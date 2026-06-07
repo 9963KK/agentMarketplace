@@ -111,11 +111,43 @@ impl ChainCore {
 
 - 一个 `ChainNode` 只能属于一个 `TaskChain`
 - `append_node` 必须连接到当前 head，避免分叉
+- `append_node` 要求 previous node 已有 output
+- `append_node.input` 必须等于 previous node 的 output
 - `submit_output` 的 artifact 必须已注册 manifest
 - `add_holder` 的 artifact 必须已注册 manifest
 - `close_chain` 只能在 final node 有 output 后执行
 - 已关闭链不能继续追加节点
 - 平台只校验 hash / 签名 / 引用结构，不校验正文内容
+
+这些不变量保证链路结构和内容引用一致。否则平台虽然能看到 A -> B -> C 的结构，但无法证明 B 的输入确实来自 A 的输出。
+
+## 跨组件联动
+
+`ChainCore` 和 `ChainService` 第一版不直接依赖 Registry、Heartbeat、Review、Settlement。它们只暴露链路账本能力，跨组件联动由上层 runtime / scheduler 负责。
+
+典型流程：
+
+```text
+Registry.discover(capability)
+  -> 调用方选择 Agent B
+  -> Agent A 将 artifact_x 交给 B，或 B 从 holder 拉取 artifact_x
+  -> Chain.register_artifact(artifact_x)
+  -> Chain.add_holder(holder commitment)
+  -> Chain.submit_output(A_node, artifact_x)
+  -> Chain.append_node(previous=A_node, agent=B, input=artifact_x)
+```
+
+掉线流程：
+
+```text
+Heartbeat.scan()
+  -> AgentTimedOut(agent_id)
+  -> Registry.mark_timed_out(agent_id)
+  -> scheduler 查询相关 chain node
+  -> Settlement refund / scheduler retry / Review 标记 artifact 拉取失败
+```
+
+这里的关键边界是：Chain 不判断 Agent 是否 alive，也不做重新派单；它只提供可查询的链路和 artifact 事实。
 
 ## 读取内容
 
@@ -149,11 +181,16 @@ pub enum ChainError {
     ChainNotFound(ChainId),
     NodeNotFound(NodeId),
     ArtifactNotFound(ArtifactId),
+    ArtifactHashMismatch { artifact_id: ArtifactId, expected: Hash, actual: Hash },
     ChainClosed(ChainId),
     NotChainHead { expected: NodeId, actual: NodeId },
+    PreviousNodeMissingOutput(NodeId),
+    InputDoesNotMatchPreviousOutput { previous: NodeId, expected: ArtifactRef, actual: ArtifactRef },
     NodeAlreadyHasOutput(NodeId),
     FinalNodeMissingOutput(NodeId),
     DuplicateArtifact(ArtifactId),
+    DuplicateHolder { artifact_id: ArtifactId, holder_agent: AgentId },
+    EmptyContentType,
     EmptyHolderEndpoint,
 }
 ```

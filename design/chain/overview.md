@@ -42,6 +42,8 @@ append_node(chain_id, previous_node_id, agent_id, input_artifact) → node_id
 
 追加链路节点。`input_artifact` 是上一个节点交给当前节点的内容引用和 hash。
 
+第一版要求 `previous_node` 已经提交 `output`，并且 `input_artifact == previous_node.output`。这样链路结构和 artifact 流向保持一致，避免出现节点关系连上了、内容引用却断开的情况。
+
 ### submit_output
 
 ```
@@ -111,18 +113,28 @@ A 发起任务
   -> Chain.create_chain(task, A)
 
 A 交给 B
-  -> B 保存 A 的输入
-  -> Chain.append_node(A -> B, input_hash)
+  -> A 生成 artifact_x
+  -> Chain.register_artifact(artifact_x manifest)
+  -> Chain.add_holder(A holds artifact_x)
+  -> Chain.submit_output(A, artifact_x)
+  -> B 保存 / 拉取 artifact_x
+  -> Chain.append_node(A -> B, input_artifact=artifact_x)
 
 B 输出给 C
-  -> C 保存 B 的输出
-  -> Chain.submit_output(B, output_hash)
-  -> Chain.append_node(B -> C, input_hash=output_hash)
+  -> B 生成 artifact_y
+  -> Chain.register_artifact(artifact_y manifest)
+  -> Chain.add_holder(B holds artifact_y)
+  -> Chain.submit_output(B, artifact_y)
+  -> C 保存 / 拉取 artifact_y
+  -> Chain.append_node(B -> C, input_artifact=artifact_y)
 
 C 输出回 A
-  -> A 保存最终输出
-  -> Chain.submit_output(C, final_hash)
-  -> Chain.close_chain(C -> A)
+  -> C 生成 final_artifact
+  -> Chain.register_artifact(final_artifact manifest)
+  -> Chain.add_holder(C holds final_artifact)
+  -> Chain.submit_output(C, final_artifact)
+  -> A 保存 / 拉取 final_artifact
+  -> Chain.close_chain(C)
 ```
 
 平台看到完整链条和 hash，但不持有内容正文。
@@ -137,6 +149,18 @@ C 输出回 A
 | Heartbeat | 节点 Agent 掉线时，Chain 可定位受影响节点 |
 | Review | Review 审查的是 `output_hash` / `artifact_id` 对应内容 |
 | Settlement | Settlement 根据 chain receipt、review 记录和掉线状态 release / refund |
+
+### 联动边界
+
+Chain 第一版不主动调用其他组件，联动由上层 runtime / scheduler 编排：
+
+1. 选择下一个 Agent：调用方先用 `Registry.discover()` 拿候选 Agent，再由 Agent 或 scheduler 决策。
+2. 追加链路前：调用方确认目标 Agent 已注册、声明能力、当前 alive、未满载。
+3. 节点掉线后：Heartbeat 发出 `AgentTimedOut`，Registry 移出可发现集合；scheduler 根据 chain 中的节点位置决定重试、改派或退款。
+4. 审阅节点输出：Review 根据 `node_id + artifact_id + root_hash` 拉取 holder 内容并校验 hash。
+5. 结算释放资金：Settlement 引用 chain/node/artifact hash、Review verdict 和 Heartbeat 状态，不读取 artifact 正文。
+
+这意味着 Chain 是事实账本，不是调度器；它保存“已经发生了什么”，不决定“下一步派给谁”。
 
 ---
 
