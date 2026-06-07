@@ -1,0 +1,11 @@
+[package]
+name = "agent-marketplace"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "agent_marketplace"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
