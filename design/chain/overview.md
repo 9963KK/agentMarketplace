@@ -1,26 +1,26 @@
 # Chain
 
-任务链路账本。平台不传输 Agent 内部消息，也不保存节点输出正文；Chain 只记录任务如何从一个 Agent 流向下一个 Agent，以及每个节点提交了哪个可验证输出。
+## 定位
+
+任务链路账本。记录任务如何从 Agent 流向 Agent，以及每个节点由谁执行、谁审查。
 
 ---
 
-## 定位
+## 两类角色，同时分配
 
-Chain 负责回答：
+每个节点在创建时就确定两类角色：
 
-- 某个任务现在走到哪个节点
-- 每个节点由哪个 Agent 执行
-- 每条边的上游和下游是谁
-- 每个节点提交了哪个输出 hash
-- 哪些 Agent 承诺保存了对应 artifact
+```
+ChainNode {
+    executor: AgentId,           // 执行者 — 产出 artifact
+    reviewers: Vec<AgentId>,     // 审查者 — 审阅 artifact
+    input: ArtifactRef,
+    output: Option<ArtifactRef>,
+    ...
+}
+```
 
-Chain 不负责：
-
-- 保存 artifact 内容
-- 传输 Agent 消息
-- 选择下一个 Agent
-- 判断输出质量
-- 结算放款
+发布者在规划链路时，通过 Registry 同时选好执行者和审查者，再调 `append_node` 创建节点。审查不是事后补的，是链路的一部分。
 
 ---
 
@@ -29,20 +29,22 @@ Chain 不负责：
 ### create_chain
 
 ```
-create_chain(task_id, root_agent_id) → chain_id
+create_chain(task_id, root_agent_id, reviewers) → ChainId
 ```
 
-创建任务链。`root_agent_id` 是发起者，也是闭环最终输出接收者。
+创建任务链。`root_agent_id` 是发起者，`reviewers` 是根节点的审查者列表。根节点本身也是链路起点。
 
 ### append_node
 
 ```
-append_node(chain_id, previous_node_id, agent_id, input_artifact) → node_id
+append_node(chain_id, previous_node_id, executor, reviewers, input_artifact) → NodeId
 ```
 
-追加链路节点。`input_artifact` 是上一个节点交给当前节点的内容引用和 hash。
+追加节点。`executor` 是执行者，`reviewers` 是审查者列表。`input_artifact` 必须等于上一个节点的 output。
 
-第一版要求 `previous_node` 已经提交 `output`，并且 `input_artifact == previous_node.output`。这样链路结构和 artifact 流向保持一致，避免出现节点关系连上了、内容引用却断开的情况。
+审查者可以为空（某些节点不需要审查），但执行者不能为空。
+
+第一版仍然要求只能追加到当前 head，避免链路分叉。
 
 ### submit_output
 
@@ -50,15 +52,47 @@ append_node(chain_id, previous_node_id, agent_id, input_artifact) → node_id
 submit_output(node_id, output_ref) → ()
 ```
 
-记录节点输出。输出只记录引用、hash、签名，不保存正文。
+记录节点输出。执行者产出 artifact 后调用。
+
+要求：
+
+- `output_ref` 必须已注册 artifact manifest
+- 同一个节点只能提交一次 output
+- 平台只记录 artifact 引用和 hash，不保存正文
+
+### assign_executor
+
+```
+assign_executor(node_id, executor) → ()
+```
+
+替换节点执行者。主要用于执行者掉线、拒绝任务或长时间无输出。
+
+第一版只允许在节点未提交 output 前替换 executor。节点已经有 output 后，executor 不再修改，避免历史产出归属漂移。
+
+### assign_reviewers
+
+```
+assign_reviewers(node_id, reviewers) → ()
+```
+
+补充或替换审查者。Agent 掉线后可能需要更换审查者。
+
+第一版语义：
+
+- 替换的是 Chain 节点上的当前 reviewer assignment
+- 已创建的 ReviewSession 不受影响，因为 Review 会保存 reviewers 快照
+- 如果需要新 reviewer 审旧 output，应创建新的 ReviewSession
 
 ### close_chain
 
 ```
-close_chain(chain_id, final_node_id, receiver_agent_id) → ()
+close_chain(chain_id) → ()
 ```
 
-闭合任务链。通常是最后一个 Agent 把最终输出交回 root Agent。
+闭合链路。Chain 只检查链路结构和节点 output，不直接检查 Review 是否完成。
+
+业务上“审查完成后才能结算”由 Settlement 或上层 runtime 检查 Review 记录。这样 Chain 不需要依赖 Review，组件边界更轻。
 
 ### get_chain
 
@@ -66,122 +100,79 @@ close_chain(chain_id, final_node_id, receiver_agent_id) → ()
 get_chain(chain_id) → ChainSnapshot
 ```
 
-查询完整链路、节点状态、artifact 引用和 holder 承诺。
+查询完整链路，含每个节点的 executor、reviewers、artifact 引用。
 
 ---
 
-## Artifact Manifest
-
-平台保存的是 artifact 身份，不保存内容：
+## 数据结构
 
 ```rust
-struct ArtifactManifest {
-    artifact_id: ArtifactId,
-    root_hash: Hash,
-    size_bytes: u64,
-    content_type: String,
-    created_by: AgentId,
+struct ChainNode {
+    node_id: NodeId,
+    chain_id: ChainId,
+    executor: AgentId,
+    reviewers: Vec<AgentId>,
+    previous: Option<NodeId>,
+    next: Option<NodeId>,
+    input: Option<ArtifactRef>,
+    output: Option<ArtifactRef>,
+    status: NodeStatus,
 }
 ```
 
-第一版不做完整 magnet / torrent。可以先不拆块；如果记录 chunk，也只记录 chunk hash，不保存 chunk 内容。
-
 ---
 
-## Holder Commitment
+## 链路示例
 
-内容由 Agent 社区保存。平台只记录谁承诺保存：
-
-```rust
-struct HolderCommitment {
-    artifact_id: ArtifactId,
-    holder_agent: AgentId,
-    retrieval_endpoint: String,
-    expires_at: Timestamp,
-    signature: Signature,
-}
+```
+Node 1                    Node 2                    Node 3
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│ executor: B       │     │ executor: C       │     │ executor: D       │
+│ reviewers: [R1,R2]│ ──► │ reviewers: [R1]   │ ──► │ reviewers: [R2]   │
+│ input: (from A)   │     │ input: artifact_y  │     │ input: artifact_z  │
+│ output: artifact_x│     │ output: artifact_y │     │ output: artifact_f │
+└──────────────────┘     └──────────────────┘     └──────────────────┘
 ```
 
-读取 artifact 时，调用方根据 holder 承诺去对应 Agent 拉取内容，再校验 `root_hash`。
-
 ---
 
-## 数据流
+## 与 Registry 的关系
 
-```text
-A 发起任务
-  -> Chain.create_chain(task, A)
+发布者规划链路：
 
-A 交给 B
-  -> A 生成 artifact_x
-  -> Chain.register_artifact(artifact_x manifest)
-  -> Chain.add_holder(A holds artifact_x)
-  -> Chain.submit_output(A, artifact_x)
-  -> B 保存 / 拉取 artifact_x
-  -> Chain.append_node(A -> B, input_artifact=artifact_x)
-
-B 输出给 C
-  -> B 生成 artifact_y
-  -> Chain.register_artifact(artifact_y manifest)
-  -> Chain.add_holder(B holds artifact_y)
-  -> Chain.submit_output(B, artifact_y)
-  -> C 保存 / 拉取 artifact_y
-  -> Chain.append_node(B -> C, input_artifact=artifact_y)
-
-C 输出回 A
-  -> C 生成 final_artifact
-  -> Chain.register_artifact(final_artifact manifest)
-  -> Chain.add_holder(C holds final_artifact)
-  -> Chain.submit_output(C, final_artifact)
-  -> A 保存 / 拉取 final_artifact
-  -> Chain.close_chain(C)
+```
+discover("code-analysis")       → 选 executor
+discover("review:code-analysis") → 选 reviewers
+chain.append_node(executor, reviewers, input)
 ```
 
-平台看到完整链条和 hash，但不持有内容正文。
+---
+
+## 与 Review 的关系
+
+节点创建时审查者已分配。执行者产出 artifact 后，发布者或 runtime 用节点上的 reviewers 和 output 创建 ReviewSession。
+
+```
+ChainNode.output + ChainNode.reviewers
+  -> Review.request(node_id, artifact_ref, reviewers_snapshot, criteria)
+```
+
+Review 记录的是创建会话时的快照。后续 `assign_reviewers()` 不会修改已有 ReviewSession。
 
 ---
 
-## 与其他组件的关系
+## Agent 掉线处理
 
-| 组件 | 关系 |
-|------|------|
-| Registry | Agent 自己用 Registry 发现下一个节点；Chain 只记录结果 |
-| Heartbeat | 节点 Agent 掉线时，Chain 可定位受影响节点 |
-| Review | Review 审查的是 `output_hash` / `artifact_id` 对应内容 |
-| Settlement | Settlement 根据 chain receipt、review 记录和掉线状态 release / refund |
+- **执行者掉线**：Heartbeat → Registry 移除 → 发布者通过 Registry 选新执行者 → `assign_executor()` → 继续
+- **审查者掉线且未创建 ReviewSession**：Heartbeat → Registry 移除 → 发布者调 `assign_reviewers()` 替换
+- **审查者掉线且已创建 ReviewSession**：旧 session 保留；如果需要替换审阅，新建 ReviewSession
 
-### 联动边界
-
-Chain 第一版不主动调用其他组件，联动由上层 runtime / scheduler 编排：
-
-1. 选择下一个 Agent：调用方先用 `Registry.discover()` 拿候选 Agent，再由 Agent 或 scheduler 决策。
-2. 追加链路前：调用方确认目标 Agent 已注册、声明能力、当前 alive、未满载。
-3. 节点掉线后：Heartbeat 发出 `AgentTimedOut`，Registry 移出可发现集合；scheduler 根据 chain 中的节点位置决定重试、改派或退款。
-4. 审阅节点输出：Review 根据 `node_id + artifact_id + root_hash` 拉取 holder 内容并校验 hash。
-5. 结算释放资金：Settlement 引用 chain/node/artifact hash、Review verdict 和 Heartbeat 状态，不读取 artifact 正文。
-
-这意味着 Chain 是事实账本，不是调度器；它保存“已经发生了什么”，不决定“下一步派给谁”。
+Chain 不主动订阅 Heartbeat，也不自动改派。掉线事件由上层 runtime / scheduler 消费后调用 Chain。
 
 ---
 
 ## 平台存储边界
 
-平台保存：
+平台存：chain / node / executor / reviewers / artifact hash / holder 承诺
 
-- chain id
-- node id
-- agent id
-- previous / next 关系
-- artifact hash
-- holder commitment
-- signatures
-- status
-
-平台不保存：
-
-- artifact 正文
-- chunk 正文
-- Agent 内部日志
-- Agent 间私有通信
-
-第一版目标是可追溯、可验证、低存储责任。
+平台不存：artifact 正文、Agent 间通信内容

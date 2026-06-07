@@ -106,7 +106,8 @@ pub struct TaskChain {
 pub struct ChainNode {
     pub node_id: NodeId,
     pub chain_id: ChainId,
-    pub agent_id: AgentId,
+    pub executor: AgentId,
+    pub reviewers: Vec<AgentId>,
     pub previous: Option<NodeId>,
     pub next: Option<NodeId>,
     pub input: Option<ArtifactRef>,
@@ -141,6 +142,7 @@ pub enum ChainError {
         expected: NodeId,
         actual: NodeId,
     },
+    DuplicateReviewer(AgentId),
     PreviousNodeMissingOutput(NodeId),
     InputDoesNotMatchPreviousOutput {
         previous: NodeId,
@@ -148,6 +150,7 @@ pub enum ChainError {
         actual: ArtifactRef,
     },
     NodeAlreadyHasOutput(NodeId),
+    NodeAlreadyCompleted(NodeId),
     FinalNodeMissingOutput(NodeId),
     DuplicateArtifact(ArtifactId),
     DuplicateHolder {
@@ -185,6 +188,9 @@ impl fmt::Display for ChainError {
                     "node is not chain head: expected={expected}, actual={actual}"
                 )
             }
+            ChainError::DuplicateReviewer(agent_id) => {
+                write!(f, "duplicate reviewer: {agent_id}")
+            }
             ChainError::PreviousNodeMissingOutput(node_id) => {
                 write!(f, "previous node is missing output: {node_id}")
             }
@@ -198,6 +204,9 @@ impl fmt::Display for ChainError {
             ),
             ChainError::NodeAlreadyHasOutput(node_id) => {
                 write!(f, "node already has output: {node_id}")
+            }
+            ChainError::NodeAlreadyCompleted(node_id) => {
+                write!(f, "node already completed: {node_id}")
             }
             ChainError::FinalNodeMissingOutput(node_id) => {
                 write!(f, "final node is missing output: {node_id}")

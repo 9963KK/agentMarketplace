@@ -22,7 +22,14 @@ impl ChainCore {
         Self::default()
     }
 
-    pub fn create_chain(&mut self, task_id: TaskId, root_agent: AgentId) -> ChainId {
+    pub fn create_chain(
+        &mut self,
+        task_id: TaskId,
+        root_agent: AgentId,
+        reviewers: Vec<AgentId>,
+    ) -> Result<ChainId, ChainError> {
+        validate_reviewers(&reviewers)?;
+
         let chain_id = self.next_chain_id();
         let root_node_id = self.next_node_id();
 
@@ -31,7 +38,8 @@ impl ChainCore {
             ChainNode {
                 node_id: root_node_id.clone(),
                 chain_id: chain_id.clone(),
-                agent_id: root_agent.clone(),
+                executor: root_agent.clone(),
+                reviewers,
                 previous: None,
                 next: None,
                 input: None,
@@ -50,16 +58,18 @@ impl ChainCore {
             },
         );
 
-        chain_id
+        Ok(chain_id)
     }
 
     pub fn append_node(
         &mut self,
         chain_id: &ChainId,
         previous: NodeId,
-        agent_id: AgentId,
+        executor: AgentId,
+        reviewers: Vec<AgentId>,
         input: ArtifactRef,
     ) -> Result<NodeId, ChainError> {
+        validate_reviewers(&reviewers)?;
         self.ensure_artifact_ref_known(&input)?;
 
         let chain = self
@@ -103,7 +113,8 @@ impl ChainCore {
             ChainNode {
                 node_id: node_id.clone(),
                 chain_id: chain_id.clone(),
-                agent_id,
+                executor,
+                reviewers,
                 previous: Some(previous),
                 next: None,
                 input: Some(input),
@@ -119,6 +130,54 @@ impl ChainCore {
         chain.head = node_id.clone();
 
         Ok(node_id)
+    }
+
+    pub fn assign_executor(
+        &mut self,
+        node_id: &NodeId,
+        executor: AgentId,
+    ) -> Result<(), ChainError> {
+        let chain_id = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| ChainError::NodeNotFound(node_id.clone()))?
+            .chain_id
+            .clone();
+        self.ensure_chain_open(&chain_id)?;
+
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| ChainError::NodeNotFound(node_id.clone()))?;
+        if node.output.is_some() {
+            return Err(ChainError::NodeAlreadyCompleted(node_id.clone()));
+        }
+
+        node.executor = executor;
+        Ok(())
+    }
+
+    pub fn assign_reviewers(
+        &mut self,
+        node_id: &NodeId,
+        reviewers: Vec<AgentId>,
+    ) -> Result<(), ChainError> {
+        validate_reviewers(&reviewers)?;
+
+        let chain_id = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| ChainError::NodeNotFound(node_id.clone()))?
+            .chain_id
+            .clone();
+        self.ensure_chain_open(&chain_id)?;
+
+        let node = self
+            .nodes
+            .get_mut(node_id)
+            .ok_or_else(|| ChainError::NodeNotFound(node_id.clone()))?;
+        node.reviewers = reviewers;
+        Ok(())
     }
 
     pub fn register_artifact(&mut self, manifest: ArtifactManifest) -> Result<(), ChainError> {
@@ -178,11 +237,7 @@ impl ChainCore {
         Ok(())
     }
 
-    pub fn close_chain(
-        &mut self,
-        chain_id: &ChainId,
-        final_node: &NodeId,
-    ) -> Result<(), ChainError> {
+    pub fn close_chain(&mut self, chain_id: &ChainId) -> Result<(), ChainError> {
         let chain = self
             .chains
             .get(chain_id)
@@ -190,19 +245,11 @@ impl ChainCore {
         if chain.status == ChainStatus::Closed {
             return Err(ChainError::ChainClosed(chain_id.clone()));
         }
-        if chain.head != *final_node {
-            return Err(ChainError::NotChainHead {
-                expected: chain.head.clone(),
-                actual: final_node.clone(),
-            });
-        }
 
-        let node = self
-            .nodes
-            .get(final_node)
-            .ok_or_else(|| ChainError::NodeNotFound(final_node.clone()))?;
-        if node.output.is_none() {
-            return Err(ChainError::FinalNodeMissingOutput(final_node.clone()));
+        for node in self.nodes_for_chain(chain) {
+            if node.output.is_none() {
+                return Err(ChainError::FinalNodeMissingOutput(node.node_id));
+            }
         }
 
         let chain = self
@@ -262,6 +309,18 @@ impl ChainCore {
         Ok(())
     }
 
+    fn ensure_chain_open(&self, chain_id: &ChainId) -> Result<(), ChainError> {
+        let chain = self
+            .chains
+            .get(chain_id)
+            .ok_or_else(|| ChainError::ChainNotFound(chain_id.clone()))?;
+        if chain.status == ChainStatus::Closed {
+            return Err(ChainError::ChainClosed(chain_id.clone()));
+        }
+
+        Ok(())
+    }
+
     fn nodes_for_chain(&self, chain: &TaskChain) -> Vec<ChainNode> {
         let root = self
             .nodes
@@ -301,6 +360,17 @@ fn validate_manifest(manifest: &ArtifactManifest) -> Result<(), ChainError> {
     }
     if manifest.content_type.trim().is_empty() {
         return Err(ChainError::EmptyContentType);
+    }
+
+    Ok(())
+}
+
+fn validate_reviewers(reviewers: &[AgentId]) -> Result<(), ChainError> {
+    let mut seen = HashSet::new();
+    for reviewer in reviewers {
+        if !seen.insert(reviewer.clone()) {
+            return Err(ChainError::DuplicateReviewer(reviewer.clone()));
+        }
     }
 
     Ok(())
@@ -373,7 +443,9 @@ mod tests {
     }
 
     fn create_chain_with_root(core: &mut ChainCore) -> (ChainId, NodeId) {
-        let chain_id = core.create_chain(task("task-1"), agent("agent-a"));
+        let chain_id = core
+            .create_chain(task("task-1"), agent("agent-a"), vec![agent("reviewer-1")])
+            .unwrap();
         let root = core.get_chain(&chain_id).unwrap().chain.head;
 
         (chain_id, root)
@@ -383,7 +455,9 @@ mod tests {
     fn create_chain_creates_root_node_snapshot() {
         let mut core = ChainCore::new();
 
-        let chain_id = core.create_chain(task("task-1"), agent("agent-a"));
+        let chain_id = core
+            .create_chain(task("task-1"), agent("agent-a"), vec![agent("reviewer-1")])
+            .unwrap();
         let snapshot = core.get_chain(&chain_id).unwrap();
 
         assert_eq!(core.chain_count(), 1);
@@ -391,9 +465,25 @@ mod tests {
         assert_eq!(snapshot.chain.root_agent, agent("agent-a"));
         assert_eq!(snapshot.chain.status, ChainStatus::Open);
         assert_eq!(snapshot.nodes.len(), 1);
-        assert_eq!(snapshot.nodes[0].agent_id, agent("agent-a"));
+        assert_eq!(snapshot.nodes[0].executor, agent("agent-a"));
+        assert_eq!(snapshot.nodes[0].reviewers, vec![agent("reviewer-1")]);
         assert_eq!(snapshot.nodes[0].previous, None);
         assert_eq!(snapshot.nodes[0].status, NodeStatus::Pending);
+    }
+
+    #[test]
+    fn create_chain_rejects_duplicate_reviewers() {
+        let mut core = ChainCore::new();
+
+        assert_eq!(
+            core.create_chain(
+                task("task-1"),
+                agent("agent-a"),
+                vec![agent("reviewer-1"), agent("reviewer-1")],
+            )
+            .unwrap_err(),
+            ChainError::DuplicateReviewer(agent("reviewer-1"))
+        );
     }
 
     #[test]
@@ -465,6 +555,7 @@ mod tests {
                 &chain_id,
                 root,
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap_err(),
@@ -484,6 +575,7 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap_err(),
@@ -507,6 +599,7 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-b", "hash-b"),
             )
             .unwrap_err(),
@@ -533,6 +626,7 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap();
@@ -542,6 +636,7 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-c"),
+                vec![agent("reviewer-c")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap_err(),
@@ -593,12 +688,72 @@ mod tests {
     }
 
     #[test]
-    fn close_chain_requires_final_head_with_output() {
+    fn assign_executor_and_reviewers_update_pending_node() {
+        let mut core = ChainCore::new();
+        let (chain_id, root) = create_chain_with_root(&mut core);
+        core.register_artifact(manifest("artifact-a", "hash-a", "agent-a"))
+            .unwrap();
+        core.submit_output(&root, artifact_ref("artifact-a", "hash-a"))
+            .unwrap();
+        let node_b = core
+            .append_node(
+                &chain_id,
+                root,
+                agent("agent-b"),
+                vec![agent("reviewer-b")],
+                artifact_ref("artifact-a", "hash-a"),
+            )
+            .unwrap();
+
+        core.assign_executor(&node_b, agent("agent-c")).unwrap();
+        core.assign_reviewers(&node_b, vec![agent("reviewer-c")])
+            .unwrap();
+        let node = core
+            .get_chain(&chain_id)
+            .unwrap()
+            .nodes
+            .into_iter()
+            .find(|node| node.node_id == node_b)
+            .unwrap();
+
+        assert_eq!(node.executor, agent("agent-c"));
+        assert_eq!(node.reviewers, vec![agent("reviewer-c")]);
+    }
+
+    #[test]
+    fn assign_executor_rejects_completed_node() {
+        let mut core = ChainCore::new();
+        let (_, root) = create_chain_with_root(&mut core);
+        core.register_artifact(manifest("artifact-a", "hash-a", "agent-a"))
+            .unwrap();
+        core.submit_output(&root, artifact_ref("artifact-a", "hash-a"))
+            .unwrap();
+
+        assert_eq!(
+            core.assign_executor(&root, agent("agent-b")).unwrap_err(),
+            ChainError::NodeAlreadyCompleted(root)
+        );
+    }
+
+    #[test]
+    fn assign_reviewers_rejects_duplicates() {
+        let mut core = ChainCore::new();
+        let (_, root) = create_chain_with_root(&mut core);
+
+        assert_eq!(
+            core.assign_reviewers(&root, vec![agent("reviewer-1"), agent("reviewer-1")])
+                .unwrap_err(),
+            ChainError::DuplicateReviewer(agent("reviewer-1"))
+        );
+    }
+
+    #[test]
+    fn close_chain_requires_all_nodes_to_have_output() {
         let mut core = ChainCore::new();
         let (chain_id, root) = create_chain_with_root(&mut core);
 
         assert_eq!(
-            core.close_chain(&chain_id, &root).unwrap_err(),
+            core.close_chain(&chain_id).unwrap_err(),
             ChainError::FinalNodeMissingOutput(root.clone())
         );
 
@@ -611,16 +766,14 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap();
 
         assert_eq!(
-            core.close_chain(&chain_id, &root).unwrap_err(),
-            ChainError::NotChainHead {
-                expected: node_b,
-                actual: root,
-            }
+            core.close_chain(&chain_id).unwrap_err(),
+            ChainError::FinalNodeMissingOutput(node_b)
         );
     }
 
@@ -632,13 +785,14 @@ mod tests {
             .unwrap();
         core.submit_output(&root, artifact_ref("artifact-a", "hash-a"))
             .unwrap();
-        core.close_chain(&chain_id, &root).unwrap();
+        core.close_chain(&chain_id).unwrap();
 
         assert_eq!(
             core.append_node(
                 &chain_id,
                 root,
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap_err(),
@@ -664,6 +818,7 @@ mod tests {
                 &chain_id,
                 root.clone(),
                 agent("agent-b"),
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .unwrap();

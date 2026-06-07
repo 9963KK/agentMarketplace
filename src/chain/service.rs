@@ -18,7 +18,8 @@ pub enum ChainCommand {
     CreateChain {
         task_id: TaskId,
         root_agent: AgentId,
-        reply: oneshot::Sender<ChainId>,
+        reviewers: Vec<AgentId>,
+        reply: oneshot::Sender<Result<ChainId, ChainError>>,
     },
     RegisterArtifact {
         manifest: ArtifactManifest,
@@ -36,13 +37,23 @@ pub enum ChainCommand {
     AppendNode {
         chain_id: ChainId,
         previous: NodeId,
-        agent_id: AgentId,
+        executor: AgentId,
+        reviewers: Vec<AgentId>,
         input: ArtifactRef,
         reply: oneshot::Sender<Result<NodeId, ChainError>>,
     },
+    AssignExecutor {
+        node_id: NodeId,
+        executor: AgentId,
+        reply: oneshot::Sender<Result<(), ChainError>>,
+    },
+    AssignReviewers {
+        node_id: NodeId,
+        reviewers: Vec<AgentId>,
+        reply: oneshot::Sender<Result<(), ChainError>>,
+    },
     CloseChain {
         chain_id: ChainId,
-        final_node: NodeId,
         reply: oneshot::Sender<Result<(), ChainError>>,
     },
     GetChain {
@@ -64,17 +75,20 @@ impl ChainHandle {
         &self,
         task_id: impl Into<TaskId>,
         root_agent: impl Into<AgentId>,
+        reviewers: Vec<AgentId>,
     ) -> Result<ChainId, ChainServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ChainCommand::CreateChain {
             task_id: task_id.into(),
             root_agent: root_agent.into(),
+            reviewers,
             reply,
         })
         .await?;
         response
             .await
-            .map_err(|_| ChainServiceError::ResponseDropped)
+            .map_err(|_| ChainServiceError::ResponseDropped)?
+            .map_err(ChainServiceError::Chain)
     }
 
     pub async fn register_artifact(
@@ -122,14 +136,16 @@ impl ChainHandle {
         &self,
         chain_id: impl Into<ChainId>,
         previous: impl Into<NodeId>,
-        agent_id: impl Into<AgentId>,
+        executor: impl Into<AgentId>,
+        reviewers: Vec<AgentId>,
         input: ArtifactRef,
     ) -> Result<NodeId, ChainServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ChainCommand::AppendNode {
             chain_id: chain_id.into(),
             previous: previous.into(),
-            agent_id: agent_id.into(),
+            executor: executor.into(),
+            reviewers,
             input,
             reply,
         })
@@ -140,15 +156,46 @@ impl ChainHandle {
             .map_err(ChainServiceError::Chain)
     }
 
-    pub async fn close_chain(
+    pub async fn assign_executor(
         &self,
-        chain_id: impl Into<ChainId>,
-        final_node: impl Into<NodeId>,
+        node_id: impl Into<NodeId>,
+        executor: impl Into<AgentId>,
     ) -> Result<(), ChainServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(ChainCommand::AssignExecutor {
+            node_id: node_id.into(),
+            executor: executor.into(),
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| ChainServiceError::ResponseDropped)?
+            .map_err(ChainServiceError::Chain)
+    }
+
+    pub async fn assign_reviewers(
+        &self,
+        node_id: impl Into<NodeId>,
+        reviewers: Vec<AgentId>,
+    ) -> Result<(), ChainServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(ChainCommand::AssignReviewers {
+            node_id: node_id.into(),
+            reviewers,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| ChainServiceError::ResponseDropped)?
+            .map_err(ChainServiceError::Chain)
+    }
+
+    pub async fn close_chain(&self, chain_id: impl Into<ChainId>) -> Result<(), ChainServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ChainCommand::CloseChain {
             chain_id: chain_id.into(),
-            final_node: final_node.into(),
             reply,
         })
         .await?;
@@ -254,9 +301,10 @@ impl ChainService {
             ChainCommand::CreateChain {
                 task_id,
                 root_agent,
+                reviewers,
                 reply,
             } => {
-                let _ = reply.send(self.core.create_chain(task_id, root_agent));
+                let _ = reply.send(self.core.create_chain(task_id, root_agent, reviewers));
                 None
             }
             ChainCommand::RegisterArtifact { manifest, reply } => {
@@ -278,19 +326,35 @@ impl ChainService {
             ChainCommand::AppendNode {
                 chain_id,
                 previous,
-                agent_id,
+                executor,
+                reviewers,
                 input,
                 reply,
             } => {
-                let _ = reply.send(self.core.append_node(&chain_id, previous, agent_id, input));
+                let _ = reply.send(
+                    self.core
+                        .append_node(&chain_id, previous, executor, reviewers, input),
+                );
                 None
             }
-            ChainCommand::CloseChain {
-                chain_id,
-                final_node,
+            ChainCommand::AssignExecutor {
+                node_id,
+                executor,
                 reply,
             } => {
-                let _ = reply.send(self.core.close_chain(&chain_id, &final_node));
+                let _ = reply.send(self.core.assign_executor(&node_id, executor));
+                None
+            }
+            ChainCommand::AssignReviewers {
+                node_id,
+                reviewers,
+                reply,
+            } => {
+                let _ = reply.send(self.core.assign_reviewers(&node_id, reviewers));
+                None
+            }
+            ChainCommand::CloseChain { chain_id, reply } => {
+                let _ = reply.send(self.core.close_chain(&chain_id));
                 None
             }
             ChainCommand::GetChain { chain_id, reply } => {
@@ -350,7 +414,10 @@ mod tests {
     async fn service_records_chain_artifacts_and_holders() {
         let chain = ChainService::spawn();
 
-        let chain_id = chain.create_chain("task-1", "agent-a").await.unwrap();
+        let chain_id = chain
+            .create_chain("task-1", "agent-a", vec![agent("reviewer-a")])
+            .await
+            .unwrap();
         let root = chain
             .get_chain(chain_id.clone())
             .await
@@ -376,15 +443,22 @@ mod tests {
                 chain_id.clone(),
                 root,
                 "agent-b",
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .await
             .unwrap();
+        chain
+            .assign_reviewers(node_b.clone(), vec![agent("reviewer-c")])
+            .await
+            .unwrap();
 
         let snapshot = chain.get_chain(chain_id).await.unwrap().unwrap();
+        let head = snapshot.nodes.last().unwrap();
 
         assert_eq!(snapshot.nodes.len(), 2);
         assert_eq!(snapshot.chain.head, node_b);
+        assert_eq!(head.reviewers, vec![agent("reviewer-c")]);
         assert_eq!(snapshot.artifacts.len(), 1);
         assert_eq!(snapshot.holders.len(), 1);
 
@@ -394,7 +468,10 @@ mod tests {
     #[tokio::test]
     async fn service_returns_chain_errors() {
         let chain = ChainService::spawn();
-        let chain_id = chain.create_chain("task-1", "agent-a").await.unwrap();
+        let chain_id = chain
+            .create_chain("task-1", "agent-a", vec![agent("reviewer-a")])
+            .await
+            .unwrap();
         let root = chain
             .get_chain(chain_id.clone())
             .await
@@ -408,6 +485,7 @@ mod tests {
                 chain_id,
                 root.clone(),
                 "agent-b",
+                vec![agent("reviewer-b")],
                 artifact_ref("artifact-a", "hash-a"),
             )
             .await
@@ -428,7 +506,10 @@ mod tests {
         chain.shutdown().await.unwrap();
 
         assert_eq!(
-            chain.create_chain("task-1", "agent-a").await.unwrap_err(),
+            chain
+                .create_chain("task-1", "agent-a", Vec::new())
+                .await
+                .unwrap_err(),
             ChainServiceError::Stopped
         );
     }
