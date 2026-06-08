@@ -6,6 +6,8 @@
 
 | 规则 | 实现 |
 |------|------|
+| 余额只能从入金产生 | `deposit()` 是唯一入金入口 |
+| 托管必须先扣款 | `hold()` 检查余额并扣减发布者余额 |
 | 执行者放款必须有审查记录 | `release(executor)` 前查验 Review 最新 session 全部 Passed |
 | 掉线自动退款 | Heartbeat 超时 → `refund()` |
 | 流水不可逆 | ledger 只追加 |
@@ -14,16 +16,38 @@
 
 | 原语 | 说明 |
 |------|------|
-| `hold(from, amount, task_id, role)` | 托管资金 |
-| `release(hold_id, to)` | 放款 |
-| `refund(hold_id)` | 退款 |
+| `deposit(agent_id, amount)` | 账户入金，写入 ledger |
+| `hold(from, amount, task_id, role)` | 检查余额并扣款，创建 Active 托管 |
+| `release(hold_id, to)` | 将托管资金放款给目标 Agent |
+| `refund(hold_id)` | 将托管资金退回发布者 |
 | `balance(agent_id)` | 查询余额 |
+
+## 资金守恒
+
+```
+deposit(publisher, 100)
+  → publisher balance +100
+
+hold(publisher, 100, task, Executor(executor))
+  → publisher balance -100
+  → hold Active，amount=100
+
+release(hold, executor)
+  → hold Released
+  → executor balance +100
+
+refund(hold)
+  → hold Refunded
+  → publisher balance +100
+```
+
+除 `deposit()` 外，Settlement 不能凭空增加余额。`release()` 和 `refund()` 只释放已经在 `hold()` 中扣减并托管的资金。
 
 ## 按角色放款
 
 | 角色 | 条件 |
 |------|------|
-| Executor | Review 上该 task_id 的最新 session **全部 Passed** |
+| Executor | Review 上该 task_id 的最新 session **全部 Passed**，且 `to` 必须等于 hold 绑定的 executor |
 | Reviewer | 该 reviewer 已提交 verdict（不管 Passed 还是 Failed） |
 
 ## 重做与换人
@@ -58,7 +82,7 @@ struct Hold {
 }
 
 enum HoldRole {
-    Executor,
+    Executor(AgentId),
     Reviewer(AgentId),
 }
 
