@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::chain::{ArtifactRef, NodeId, Timestamp};
 use crate::heartbeat::AgentId;
+use crate::types::{OutputHash, TaskId, Timestamp};
 
 use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
 
@@ -12,7 +12,7 @@ const MAX_SCORE_BPS: u16 = 10_000;
 #[derive(Debug, Default)]
 pub struct ReviewCore {
     sessions: HashMap<ReviewId, ReviewSession>,
-    sessions_by_node: HashMap<NodeId, Vec<ReviewId>>,
+    sessions_by_task: HashMap<TaskId, Vec<ReviewId>>,
     next_review: u64,
 }
 
@@ -23,8 +23,9 @@ impl ReviewCore {
 
     pub fn request(
         &mut self,
-        node_id: NodeId,
-        artifact_ref: ArtifactRef,
+        task_id: TaskId,
+        executor_id: AgentId,
+        output_hash: OutputHash,
         allowed_reviewers: Vec<AgentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
@@ -37,16 +38,17 @@ impl ReviewCore {
             review_id.clone(),
             ReviewSession {
                 review_id: review_id.clone(),
-                node_id: node_id.clone(),
-                artifact_ref,
+                task_id: task_id.clone(),
+                executor_id,
+                output_hash,
                 allowed_reviewers,
                 criteria,
                 verdicts: Vec::new(),
                 created_at,
             },
         );
-        self.sessions_by_node
-            .entry(node_id)
+        self.sessions_by_task
+            .entry(task_id)
             .or_default()
             .push(review_id.clone());
 
@@ -98,8 +100,8 @@ impl ReviewCore {
             .map(|session| session.verdicts.clone())
     }
 
-    pub fn collect_by_node(&self, node_id: &NodeId) -> Vec<ReviewSession> {
-        let Some(review_ids) = self.sessions_by_node.get(node_id) else {
+    pub fn collect_by_task(&self, task_id: &TaskId) -> Vec<ReviewSession> {
+        let Some(review_ids) = self.sessions_by_task.get(task_id) else {
             return Vec::new();
         };
 
@@ -168,8 +170,8 @@ fn validate_verdict(verdict: &Verdict) -> Result<(), ReviewError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::chain::{ArtifactId, Hash};
     use crate::review::{CriteriaFormat, VerdictKind};
+    use crate::types::OutputHash;
 
     use super::*;
 
@@ -177,15 +179,12 @@ mod tests {
         AgentId::from(id)
     }
 
-    fn node(id: &str) -> NodeId {
-        NodeId::from(id)
+    fn task(id: &str) -> TaskId {
+        TaskId::from(id)
     }
 
-    fn artifact_ref(id: &str, root_hash: &str) -> ArtifactRef {
-        ArtifactRef {
-            artifact_id: ArtifactId::from(id),
-            root_hash: Hash::from(root_hash),
-        }
+    fn output_hash(value: &str) -> OutputHash {
+        OutputHash::from(value)
     }
 
     fn criteria() -> ReviewCriteria {
@@ -202,8 +201,9 @@ mod tests {
 
     fn request_review(core: &mut ReviewCore) -> ReviewId {
         core.request(
-            node("node-1"),
-            artifact_ref("artifact-1", "hash-1"),
+            task("task-1"),
+            agent("executor-1"),
+            output_hash("hash-1"),
             vec![agent("reviewer-1"), agent("reviewer-2")],
             criteria(),
             Timestamp(1),
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn request_creates_session_and_node_index() {
+    fn request_creates_session_and_task_index() {
         let mut core = ReviewCore::new();
 
         let review_id = request_review(&mut core);
@@ -220,10 +220,12 @@ mod tests {
 
         assert_eq!(core.session_count(), 1);
         assert_eq!(session.review_id, review_id);
-        assert_eq!(session.node_id, node("node-1"));
+        assert_eq!(session.task_id, task("task-1"));
+        assert_eq!(session.executor_id, agent("executor-1"));
+        assert_eq!(session.output_hash, output_hash("hash-1"));
         assert_eq!(session.allowed_reviewers.len(), 2);
         assert_eq!(session.criteria.format, CriteriaFormat::PlainText);
-        assert_eq!(core.collect_by_node(&node("node-1")).len(), 1);
+        assert_eq!(core.collect_by_task(&task("task-1")).len(), 1);
     }
 
     #[test]
@@ -232,8 +234,9 @@ mod tests {
 
         let review_id = core
             .request(
-                node("node-1"),
-                artifact_ref("artifact-1", "hash-1"),
+                task("task-1"),
+                agent("executor-1"),
+                output_hash("hash-1"),
                 Vec::new(),
                 criteria(),
                 Timestamp(1),
@@ -243,8 +246,9 @@ mod tests {
 
         assert_eq!(
             core.request(
-                node("node-2"),
-                artifact_ref("artifact-2", "hash-2"),
+                task("task-2"),
+                agent("executor-1"),
+                output_hash("hash-2"),
                 vec![agent("reviewer-1"), agent("reviewer-1")],
                 criteria(),
                 Timestamp(1),
@@ -260,8 +264,9 @@ mod tests {
 
         assert_eq!(
             core.request(
-                node("node-1"),
-                artifact_ref("artifact-1", "hash-1"),
+                task("task-1"),
+                agent("executor-1"),
+                output_hash("hash-1"),
                 vec![agent("reviewer-1")],
                 ReviewCriteria::plain_text(" "),
                 Timestamp(1),
@@ -273,8 +278,9 @@ mod tests {
         let large = "x".repeat(MAX_CRITERIA_BYTES + 1);
         assert_eq!(
             core.request(
-                node("node-1"),
-                artifact_ref("artifact-1", "hash-1"),
+                task("task-1"),
+                agent("executor-1"),
+                output_hash("hash-1"),
                 vec![agent("reviewer-1")],
                 ReviewCriteria::json(large),
                 Timestamp(1),

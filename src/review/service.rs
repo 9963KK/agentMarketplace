@@ -3,8 +3,8 @@ use std::fmt;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::chain::{ArtifactRef, NodeId, Timestamp};
 use crate::heartbeat::AgentId;
+use crate::types::{OutputHash, TaskId, Timestamp};
 
 use super::ReviewCore;
 use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
@@ -14,8 +14,9 @@ const DEFAULT_COMMAND_BUFFER: usize = 128;
 #[derive(Debug)]
 pub enum ReviewCommand {
     Request {
-        node_id: NodeId,
-        artifact_ref: ArtifactRef,
+        task_id: TaskId,
+        executor_id: AgentId,
+        output_hash: OutputHash,
         allowed_reviewers: Vec<AgentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
@@ -32,8 +33,8 @@ pub enum ReviewCommand {
         review_id: ReviewId,
         reply: oneshot::Sender<Option<Vec<VerdictRecord>>>,
     },
-    CollectByNode {
-        node_id: NodeId,
+    CollectByTask {
+        task_id: TaskId,
         reply: oneshot::Sender<Vec<ReviewSession>>,
     },
     Shutdown {
@@ -49,16 +50,18 @@ pub struct ReviewHandle {
 impl ReviewHandle {
     pub async fn request(
         &self,
-        node_id: impl Into<NodeId>,
-        artifact_ref: ArtifactRef,
+        task_id: impl Into<TaskId>,
+        executor_id: impl Into<AgentId>,
+        output_hash: impl Into<OutputHash>,
         allowed_reviewers: Vec<AgentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
     ) -> Result<ReviewId, ReviewServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ReviewCommand::Request {
-            node_id: node_id.into(),
-            artifact_ref,
+            task_id: task_id.into(),
+            executor_id: executor_id.into(),
+            output_hash: output_hash.into(),
             allowed_reviewers,
             criteria,
             created_at,
@@ -108,13 +111,13 @@ impl ReviewHandle {
             .map_err(|_| ReviewServiceError::ResponseDropped)
     }
 
-    pub async fn collect_by_node(
+    pub async fn collect_by_task(
         &self,
-        node_id: impl Into<NodeId>,
+        task_id: impl Into<TaskId>,
     ) -> Result<Vec<ReviewSession>, ReviewServiceError> {
         let (reply, response) = oneshot::channel();
-        self.send(ReviewCommand::CollectByNode {
-            node_id: node_id.into(),
+        self.send(ReviewCommand::CollectByTask {
+            task_id: task_id.into(),
             reply,
         })
         .await?;
@@ -204,16 +207,18 @@ impl ReviewService {
     fn handle_command(&mut self, command: ReviewCommand) -> Option<oneshot::Sender<()>> {
         match command {
             ReviewCommand::Request {
-                node_id,
-                artifact_ref,
+                task_id,
+                executor_id,
+                output_hash,
                 allowed_reviewers,
                 criteria,
                 created_at,
                 reply,
             } => {
                 let _ = reply.send(self.core.request(
-                    node_id,
-                    artifact_ref,
+                    task_id,
+                    executor_id,
+                    output_hash,
                     allowed_reviewers,
                     criteria,
                     created_at,
@@ -238,8 +243,8 @@ impl ReviewService {
                 let _ = reply.send(self.core.collect(&review_id));
                 None
             }
-            ReviewCommand::CollectByNode { node_id, reply } => {
-                let _ = reply.send(self.core.collect_by_node(&node_id));
+            ReviewCommand::CollectByTask { task_id, reply } => {
+                let _ = reply.send(self.core.collect_by_task(&task_id));
                 None
             }
             ReviewCommand::Shutdown { reply } => Some(reply),
@@ -249,20 +254,12 @@ impl ReviewService {
 
 #[cfg(test)]
 mod tests {
-    use crate::chain::{ArtifactId, Hash};
     use crate::review::{MAX_CRITERIA_BYTES, VerdictKind};
 
     use super::*;
 
     fn agent(id: &str) -> AgentId {
         AgentId::from(id)
-    }
-
-    fn artifact_ref(id: &str, root_hash: &str) -> ArtifactRef {
-        ArtifactRef {
-            artifact_id: ArtifactId::from(id),
-            root_hash: Hash::from(root_hash),
-        }
     }
 
     fn verdict(kind: VerdictKind, score_bps: u16) -> Verdict {
@@ -279,8 +276,9 @@ mod tests {
 
         let review_id = review
             .request(
-                "node-1",
-                artifact_ref("artifact-1", "hash-1"),
+                "task-1",
+                "executor-1",
+                "hash-1",
                 vec![agent("reviewer-1")],
                 ReviewCriteria::plain_text("check output"),
                 Timestamp(1),
@@ -298,11 +296,12 @@ mod tests {
             .unwrap();
 
         let verdicts = review.collect(review_id.clone()).await.unwrap().unwrap();
-        let by_node = review.collect_by_node("node-1").await.unwrap();
+        let by_task = review.collect_by_task("task-1").await.unwrap();
 
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(by_node.len(), 1);
-        assert_eq!(by_node[0].review_id, review_id);
+        assert_eq!(by_task.len(), 1);
+        assert_eq!(by_task[0].review_id, review_id);
+        assert_eq!(by_task[0].executor_id, agent("executor-1"));
 
         review.shutdown().await.unwrap();
     }
@@ -313,8 +312,9 @@ mod tests {
 
         let error = review
             .request(
-                "node-1",
-                artifact_ref("artifact-1", "hash-1"),
+                "task-1",
+                "executor-1",
+                "hash-1",
                 vec![agent("reviewer-1")],
                 ReviewCriteria::plain_text("x".repeat(MAX_CRITERIA_BYTES + 1)),
                 Timestamp(1),
@@ -342,8 +342,9 @@ mod tests {
         assert_eq!(
             review
                 .request(
-                    "node-1",
-                    artifact_ref("artifact-1", "hash-1"),
+                    "task-1",
+                    "executor-1",
+                    "hash-1",
                     Vec::new(),
                     ReviewCriteria::plain_text("check output"),
                     Timestamp(1),

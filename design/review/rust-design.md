@@ -2,20 +2,20 @@
 
 ## 目标
 
-Review 是审阅账本。它记录审查 Agent 对某个 Chain 节点 output artifact 的 verdict。
+Review 是审阅账本。它记录审查 Agent 对某个任务输出 hash 的 verdict。
 
-Review 不保存 artifact 内容，不拉取 holder，不校验 hash，不判断最终通过，不做结算。
+Review 不保存 artifact 内容，不拉取内容，不校验 hash，不判断最终通过，不做结算。
 
 ## 设计选择
 
-采用和 Heartbeat / Registry / Chain 一致的结构：
+采用和 Heartbeat / Registry 一致的结构：
 
 ```text
 ReviewCore      纯状态机
 ReviewService   Tokio 命令循环
 ```
 
-`ReviewCore` 不读系统时间，不访问网络，不直接查询 Chain。调用方在 `request()` 时传入从 Chain 读取到的 `node_id`、`artifact_ref` 和 reviewers 快照。
+`ReviewCore` 不读系统时间，不访问网络。调用方在 `request()` 时传入 `task_id`、`executor_id`、`output_hash` 和 reviewers 快照。
 
 ## 模块结构
 
@@ -26,7 +26,7 @@ src/
 │   ├── core.rs
 │   ├── service.rs
 │   └── types.rs
-├── chain/
+├── types.rs
 ├── registry/
 ├── heartbeat/
 └── settlement/
@@ -37,32 +37,23 @@ src/
 ```rust
 pub struct ReviewCore {
     sessions: HashMap<ReviewId, ReviewSession>,
-    sessions_by_node: HashMap<NodeId, Vec<ReviewId>>,
+    sessions_by_task: HashMap<TaskId, Vec<ReviewId>>,
     next_review: u64,
 }
 
 pub struct ReviewSession {
     pub review_id: ReviewId,
-    pub node_id: NodeId,
-    pub artifact_ref: ArtifactRef,
+    pub task_id: TaskId,
+    pub executor_id: AgentId,
+    pub output_hash: OutputHash,
     pub allowed_reviewers: Vec<AgentId>,
     pub criteria: ReviewCriteria,
     pub verdicts: Vec<VerdictRecord>,
     pub created_at: Timestamp,
 }
-
-pub struct ReviewCriteria {
-    pub format: CriteriaFormat,
-    pub body: String,
-}
-
-pub enum CriteriaFormat {
-    PlainText,
-    Json,
-}
 ```
 
-ReviewSession 是创建时快照。后续 Chain 修改 reviewers 不会回写已有 session。
+ReviewSession 是创建时快照。任务链路由发起 Agent 自己管理，平台不保存节点关系。
 
 ## Verdict
 
@@ -97,8 +88,9 @@ pub enum VerdictKind {
 impl ReviewCore {
     pub fn request(
         &mut self,
-        node_id: NodeId,
-        artifact_ref: ArtifactRef,
+        task_id: TaskId,
+        executor_id: AgentId,
+        output_hash: OutputHash,
         allowed_reviewers: Vec<AgentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
@@ -113,7 +105,7 @@ impl ReviewCore {
     ) -> Result<(), ReviewError>;
 
     pub fn collect(&self, review_id: &ReviewId) -> Option<Vec<VerdictRecord>>;
-    pub fn collect_by_node(&self, node_id: &NodeId) -> Vec<ReviewSession>;
+    pub fn collect_by_task(&self, task_id: &TaskId) -> Vec<ReviewSession>;
 }
 ```
 
@@ -129,7 +121,7 @@ impl ReviewCore {
 - `criteria.body` 不能为空且不能超过上限
 - `feedback` 不能超过上限
 - `score_bps <= 10000`
-- Review 不修改 Chain 节点，不修改 Settlement
+- Review 不管理任务链路，不修改 Settlement
 
 ## 大小限制
 
@@ -138,37 +130,25 @@ impl ReviewCore {
 - `criteria.body <= 16 KiB`
 - `verdict.feedback <= 32 KiB`
 
-超过限制的长文档、审查报告、证据材料都应该作为 artifact，由 Chain 保存 hash 和 holder commitment。
-
-## 与 Chain 的协作
-
-调用方负责：
-
-```text
-Chain.get_chain(chain_id)
-  -> 找到 node_id
-  -> 读取 node.output
-  -> 读取 node.reviewers
-  -> Review.request(node_id, output, reviewers, criteria, now)
-```
-
-Review 不自己查询 Chain。这样可以保持 ReviewCore 可测试、可复用，也避免组件之间循环依赖。
+超过限制的长文档、审查报告、证据材料不进入平台存储。
 
 ## 与 Settlement 的协作
 
 Settlement 可以查询：
 
 ```text
-Review.collect_by_node(node_id)
+Review.collect_by_task(task_id)
   -> sessions
-  -> verdict_count
+  -> latest session
+  -> verdict_count / verdict kinds
 ```
 
 第一版 Settlement 可用规则：
 
-- 没有 ReviewSession：不能 release
-- 有 ReviewSession 但没有 verdict：不能 release
-- 是否 release 仍由调用方或 settlement policy 决定
+- 没有 ReviewSession：不能 release executor
+- 有 ReviewSession 但没有 verdict：不能 release executor
+- executor release 使用最新 session 的 verdict 集合
+- reviewer release 只要求该 reviewer 已提交 verdict
 
 Review 不判断 passed / failed 的最终业务含义。
 
@@ -191,7 +171,7 @@ pub enum ReviewError {
 
 ## 测试重点
 
-- request 创建 session 并建立 node 索引
+- request 创建 session 并建立 task 索引
 - request 拒绝空 criteria
 - request 拒绝重复 reviewer
 - submit 拒绝未知 review
@@ -199,4 +179,4 @@ pub enum ReviewError {
 - submit 拒绝重复 verdict
 - submit 拒绝 `score_bps > 10000`
 - collect 返回不可变快照
-- collect_by_node 返回该节点所有 session
+- collect_by_task 返回该任务所有 session

@@ -17,7 +17,7 @@ Registry 负责 Agent 注册与能力发现。它回答三个问题：
 | 方案 | 说明 | 取舍 |
 |------|------|------|
 | 直接共享 `Arc<RwLock<RegistryCore>>` | 调用方直接读写 Registry 状态 | 简单，但状态不变量容易被多个调用方破坏 |
-| 单体服务内联 Registry | Registry 与 Heartbeat、Chain 等组件写在同一个服务里 | 接线少，但组件边界不清 |
+| 单体服务内联 Registry | Registry 与 Heartbeat、Review、Settlement 等组件写在同一个服务里 | 接线少，但组件边界不清 |
 | 纯核心 + Tokio 服务 | `RegistryCore` 管状态，`RegistryService` 管命令与事件 | 推荐。便于测试，也和 Heartbeat 模式一致 |
 
 采用 **纯核心 + Tokio 服务**。

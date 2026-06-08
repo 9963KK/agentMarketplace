@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::chain::{ArtifactRef, NodeId, Timestamp};
 use crate::heartbeat::AgentId;
+use crate::types::{OutputHash, TaskId, Timestamp};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReviewId(String);
@@ -75,8 +75,9 @@ impl ReviewCriteria {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewSession {
     pub review_id: ReviewId,
-    pub node_id: NodeId,
-    pub artifact_ref: ArtifactRef,
+    pub task_id: TaskId,
+    pub executor_id: AgentId,
+    pub output_hash: OutputHash,
     pub allowed_reviewers: Vec<AgentId>,
     pub criteria: ReviewCriteria,
     pub verdicts: Vec<VerdictRecord>,
