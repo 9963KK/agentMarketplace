@@ -185,8 +185,10 @@ Heartbeat 掉线后的安全清理由 Runtime 接线层完成：
 
 ```text
 Heartbeat: AgentTimedOut { agent_id }
+  -> LiveSession.assignments_by_agent(agent_id)
+  -> LiveSession.cancel_assignment(assigned_assignment_id)
   -> Settlement.active_holds_for_agent(agent_id)
-  -> Settlement.refund(hold_id)
+  -> Settlement.refund(cancelled_assignment_hold_id)
   -> Task.remove_participant(task_id, agent_id)
 ```
 

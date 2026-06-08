@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::future::Future;
 
 use crate::heartbeat::{AgentId, HeartbeatEvent, HeartbeatEventSink, PublishError};
@@ -5,7 +6,7 @@ use crate::livesession::{AssignmentStatus, LiveSessionHandle};
 use crate::registry::RegistryHandle;
 use crate::settlement::SettlementHandle;
 use crate::task::TaskHandle;
-use crate::types::Timestamp;
+use crate::types::{AssignmentId, Timestamp};
 
 use super::clock::{RuntimeClock, SystemRuntimeClock};
 use super::types::{RuntimeAction, RuntimeActionKind, RuntimeEventReport};
@@ -81,42 +82,13 @@ impl Runtime {
             });
         }
 
-        match self
-            .settlement
-            .active_holds_for_agent(agent_id.clone())
-            .await
-        {
-            Ok(holds) => {
-                for hold in holds {
-                    if hold.agent_id != agent_id {
-                        continue;
-                    }
-
-                    let hold_id = hold.hold_id;
-                    if let Err(error) = self.settlement.refund(hold_id.clone(), at).await {
-                        report.record_error(
-                            RuntimeActionKind::RefundHold,
-                            hold_id.to_string(),
-                            error,
-                        );
-                    } else {
-                        report.record_action(RuntimeAction::HoldRefunded { hold_id });
-                    }
-                }
-            }
-            Err(error) => report.record_error(
-                RuntimeActionKind::ListActiveHoldsForAgent,
-                agent_id.to_string(),
-                error,
-            ),
-        }
-
-        match self
+        let assigned_assignment_ids = match self
             .live_sessions
             .assignments_by_agent(agent_id.clone())
             .await
         {
             Ok(assignments) => {
+                let mut assigned_assignment_ids = HashSet::new();
                 for assignment in assignments {
                     if assignment.status != AssignmentStatus::Assigned {
                         continue;
@@ -134,12 +106,49 @@ impl Runtime {
                             error,
                         );
                     } else {
+                        assigned_assignment_ids.insert(assignment_id.clone());
                         report.record_action(RuntimeAction::AssignmentCancelled { assignment_id });
+                    }
+                }
+                assigned_assignment_ids
+            }
+            Err(error) => {
+                report.record_error(
+                    RuntimeActionKind::ListAssignmentsByAgent,
+                    agent_id.to_string(),
+                    error,
+                );
+                HashSet::<AssignmentId>::new()
+            }
+        };
+
+        match self
+            .settlement
+            .active_holds_for_agent(agent_id.clone())
+            .await
+        {
+            Ok(holds) => {
+                for hold in holds {
+                    if hold.agent_id != agent_id
+                        || !assigned_assignment_ids.contains(&hold.assignment_id)
+                    {
+                        continue;
+                    }
+
+                    let hold_id = hold.hold_id;
+                    if let Err(error) = self.settlement.refund(hold_id.clone(), at).await {
+                        report.record_error(
+                            RuntimeActionKind::RefundHold,
+                            hold_id.to_string(),
+                            error,
+                        );
+                    } else {
+                        report.record_action(RuntimeAction::HoldRefunded { hold_id });
                     }
                 }
             }
             Err(error) => report.record_error(
-                RuntimeActionKind::ListAssignmentsByAgent,
+                RuntimeActionKind::ListActiveHoldsForAgent,
                 agent_id.to_string(),
                 error,
             ),

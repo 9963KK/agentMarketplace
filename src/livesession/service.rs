@@ -3,6 +3,7 @@ use std::fmt;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::artifact::ArtifactManifest;
 use crate::heartbeat::AgentId;
 use crate::types::{AssignmentId, OutputHash, SessionId, TaskId, Timestamp};
 
@@ -35,6 +36,13 @@ pub enum LiveSessionCommand {
         assignment_id: AssignmentId,
         agent_id: AgentId,
         output_hash: OutputHash,
+        at: Timestamp,
+        reply: oneshot::Sender<Result<(), LiveSessionError>>,
+    },
+    SubmitArtifact {
+        assignment_id: AssignmentId,
+        agent_id: AgentId,
+        manifest: ArtifactManifest,
         at: Timestamp,
         reply: oneshot::Sender<Result<(), LiveSessionError>>,
     },
@@ -155,6 +163,28 @@ impl LiveSessionHandle {
             assignment_id: assignment_id.into(),
             agent_id: agent_id.into(),
             output_hash: output_hash.into(),
+            at,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| LiveSessionServiceError::ResponseDropped)?
+            .map_err(LiveSessionServiceError::LiveSession)
+    }
+
+    pub async fn submit_artifact(
+        &self,
+        assignment_id: impl Into<AssignmentId>,
+        agent_id: impl Into<AgentId>,
+        manifest: ArtifactManifest,
+        at: Timestamp,
+    ) -> Result<(), LiveSessionServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(LiveSessionCommand::SubmitArtifact {
+            assignment_id: assignment_id.into(),
+            agent_id: agent_id.into(),
+            manifest,
             at,
             reply,
         })
@@ -411,6 +441,20 @@ impl LiveSessionService {
                     );
                 None
             }
+            LiveSessionCommand::SubmitArtifact {
+                assignment_id,
+                agent_id,
+                manifest,
+                at,
+                reply,
+            } => {
+                let _ =
+                    reply.send(
+                        self.core
+                            .submit_artifact(&assignment_id, agent_id, manifest, at),
+                    );
+                None
+            }
             LiveSessionCommand::MarkApproved {
                 assignment_id,
                 at,
@@ -466,6 +510,39 @@ impl LiveSessionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{
+        ArtifactFile, ArtifactKind, ArtifactManifest, HashDigest, seal_manifest,
+    };
+
+    fn hash(value: u8) -> HashDigest {
+        HashDigest::from_sha256_hex(format!("{value:064x}")).unwrap()
+    }
+
+    fn text_manifest(
+        artifact_id: &str,
+        task_id: TaskId,
+        assignment_id: AssignmentId,
+        producer_agent_id: AgentId,
+        at: Timestamp,
+    ) -> ArtifactManifest {
+        let file = ArtifactFile::new(
+            "https://agent.example/report.md",
+            hash(1),
+            "text/markdown",
+            "text.markdown.utf8.v1",
+            120,
+        );
+        seal_manifest(ArtifactManifest::new(
+            artifact_id,
+            task_id,
+            assignment_id,
+            producer_agent_id,
+            ArtifactKind::Single,
+            vec![file],
+            at,
+        ))
+        .unwrap()
+    }
 
     #[tokio::test]
     async fn service_creates_assigns_and_submits_output() {
@@ -491,6 +568,44 @@ mod tests {
         assert_eq!(
             live.assignments_by_session(session_id).await.unwrap().len(),
             1
+        );
+
+        live.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_submits_artifact_manifest() {
+        let live = LiveSessionService::spawn();
+
+        let session_id = live.create_session("task-1", Timestamp(1)).await.unwrap();
+        let assignment_id = live
+            .assign(
+                "task-1",
+                session_id,
+                "executor",
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .await
+            .unwrap();
+        let manifest = text_manifest(
+            "artifact-1",
+            TaskId::from("task-1"),
+            assignment_id.clone(),
+            AgentId::from("executor"),
+            Timestamp(3),
+        );
+        let manifest_hash = manifest.manifest_hash.clone().unwrap();
+
+        live.submit_artifact(assignment_id.clone(), "executor", manifest, Timestamp(4))
+            .await
+            .unwrap();
+
+        let assignment = live.get_assignment(assignment_id).await.unwrap().unwrap();
+        assert_eq!(assignment.status, super::super::AssignmentStatus::Submitted);
+        assert_eq!(
+            assignment.output_hash,
+            Some(OutputHash::from(manifest_hash.to_string()))
         );
 
         live.shutdown().await.unwrap();

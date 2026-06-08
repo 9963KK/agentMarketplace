@@ -27,12 +27,37 @@ struct AgentCandidate {
     agent_id: AgentId,
     name: Option<String>,
     endpoint: Option<String>,
-    capability: CapabilityName,
+    capability: Capability,
     current_load: u32,
     max_concurrency: u32,
     // 链上数据：pass_rate、refund_count 等由外部 enricher 补充
 }
 ```
+
+## 产物协议能力
+
+第一版 Registry 代码已经支持可选的 `CapabilityContract`，用于声明 Agent 支持的 Artifact Media Profile：
+
+```rust
+struct Capability {
+    name: CapabilityName,
+    max_concurrency: u32,
+    contract: Option<CapabilityContract>,
+}
+
+struct CapabilityContract {
+    input_profiles: Vec<MediaProfileId>,
+    output_profiles: Vec<MediaProfileId>,
+}
+```
+
+能力声明时，Registry 校验：
+
+- profile 必须是 Artifact baseline profile
+- `input_profiles` 内不能重复
+- `output_profiles` 内不能重复
+
+发起 Agent 排链路时根据 output / input profile 做兼容匹配。平台不自动转码；格式不兼容时，由发起 Agent 选择 transformer Agent。
 
 ## 与 Review / Settlement 的关系
 

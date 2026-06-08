@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::artifact::{MediaProfileId, find_media_profile};
 use crate::heartbeat::AgentId;
 
 use super::types::{
@@ -244,6 +245,7 @@ fn normalize_capabilities(
         if capability.max_concurrency == 0 {
             return Err(RegistryError::ZeroMaxConcurrency(capability.name));
         }
+        validate_capability_contract(&capability)?;
 
         let name = capability.name.clone();
         if normalized.insert(name.clone(), capability).is_some() {
@@ -252,6 +254,29 @@ fn normalize_capabilities(
     }
 
     Ok(normalized)
+}
+
+fn validate_capability_contract(capability: &Capability) -> Result<(), RegistryError> {
+    let Some(contract) = &capability.contract else {
+        return Ok(());
+    };
+
+    validate_profile_list(&contract.input_profiles)?;
+    validate_profile_list(&contract.output_profiles)
+}
+
+fn validate_profile_list(profiles: &[MediaProfileId]) -> Result<(), RegistryError> {
+    let mut seen = BTreeSet::new();
+    for profile in profiles {
+        if find_media_profile(profile).is_none() {
+            return Err(RegistryError::UnsupportedMediaProfile(profile.clone()));
+        }
+        if !seen.insert(profile.clone()) {
+            return Err(RegistryError::DuplicateMediaProfile(profile.clone()));
+        }
+    }
+
+    Ok(())
 }
 
 fn max_capacity(info: &AgentInfo) -> u32 {
@@ -266,6 +291,7 @@ fn max_capacity(info: &AgentInfo) -> u32 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use super::super::types::CapabilityContract;
     use super::*;
 
     fn agent(id: &str) -> AgentId {
@@ -283,6 +309,10 @@ mod tests {
 
     fn capability(name: &str, max_concurrency: u32) -> Capability {
         Capability::new(name, max_concurrency)
+    }
+
+    fn profile(id: &str) -> MediaProfileId {
+        MediaProfileId::from(id)
     }
 
     fn query(name: &str) -> DiscoveryQuery {
@@ -329,6 +359,77 @@ mod tests {
         assert_eq!(candidates[0].agent_id, agent_id);
         assert_eq!(candidates[0].current_load, 0);
         assert_eq!(candidates[0].max_concurrency, 2);
+    }
+
+    #[test]
+    fn capability_contract_is_declared_and_discoverable() {
+        let mut registry = RegistryCore::new();
+        let agent_id = agent("agent-1");
+        let capability = Capability::new("video-review", 2).with_contract(CapabilityContract::new(
+            vec![profile("video.mp4.h264-aac.v1")],
+            vec![profile("application.vnd.agent.review-verdict-json.v1")],
+        ));
+
+        registry.register(identity("agent-1")).unwrap();
+        registry
+            .declare_capabilities(&agent_id, vec![capability])
+            .unwrap();
+        registry.mark_alive(&agent_id);
+
+        let candidates = registry.discover(query("video-review"));
+        let contract = candidates[0].capability.contract.as_ref().unwrap();
+        assert_eq!(
+            contract.input_profiles,
+            vec![profile("video.mp4.h264-aac.v1")]
+        );
+        assert_eq!(
+            contract.output_profiles,
+            vec![profile("application.vnd.agent.review-verdict-json.v1")]
+        );
+    }
+
+    #[test]
+    fn capability_contract_rejects_unsupported_profiles_without_partial_update() {
+        let mut registry = RegistryCore::new();
+        let agent_id = agent("agent-1");
+        let invalid = Capability::new("image-transform", 1).with_contract(CapabilityContract::new(
+            vec![profile("image.unknown.v1")],
+            vec![profile("image.png.srgb.v1")],
+        ));
+
+        registry.register(identity("agent-1")).unwrap();
+        registry
+            .declare_capabilities(&agent_id, vec![capability("code-review", 2)])
+            .unwrap();
+        registry.mark_alive(&agent_id);
+
+        assert_eq!(
+            registry
+                .declare_capabilities(&agent_id, vec![invalid])
+                .unwrap_err(),
+            RegistryError::UnsupportedMediaProfile(profile("image.unknown.v1"))
+        );
+        assert_eq!(registry.discover(query("code-review")).len(), 1);
+        assert!(registry.discover(query("image-transform")).is_empty());
+    }
+
+    #[test]
+    fn capability_contract_rejects_duplicate_profiles() {
+        let mut registry = RegistryCore::new();
+        let agent_id = agent("agent-1");
+        let invalid = Capability::new("image-transform", 1).with_contract(CapabilityContract::new(
+            vec![profile("image.png.srgb.v1"), profile("image.png.srgb.v1")],
+            vec![profile("image.jpeg.srgb.v1")],
+        ));
+
+        registry.register(identity("agent-1")).unwrap();
+
+        assert_eq!(
+            registry
+                .declare_capabilities(&agent_id, vec![invalid])
+                .unwrap_err(),
+            RegistryError::DuplicateMediaProfile(profile("image.png.srgb.v1"))
+        );
     }
 
     #[test]

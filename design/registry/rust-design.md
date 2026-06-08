@@ -68,6 +68,12 @@ pub struct AgentIdentity {
 pub struct Capability {
     pub name: CapabilityName,
     pub max_concurrency: u32,
+    pub contract: Option<CapabilityContract>,
+}
+
+pub struct CapabilityContract {
+    pub input_profiles: Vec<MediaProfileId>,
+    pub output_profiles: Vec<MediaProfileId>,
 }
 
 pub struct LoadInfo {
@@ -75,7 +81,11 @@ pub struct LoadInfo {
 }
 ```
 
-`agents` 是注册真相源。`AgentIdentity` 只存身份和基础连接信息。`capabilities` 是 Agent 后续声明的能力集合。`alive_agents` 表示 Heartbeat 当前认为活着的 Agent。`capability_index` 用于快速定位声明了某能力的 Agent。`load` 是 Registry 本地的运行时负载视图。
+`agents` 是注册真相源。`AgentIdentity` 只存身份和基础连接信息。`capabilities` 是 Agent 后续声明的能力集合。
+
+`CapabilityContract` 是可选协议契约，声明 Agent 支持的输入 / 输出 Artifact Media Profile。Registry 保存并发现这些契约，只校验 profile 是否属于 baseline，以及同一列表内是否重复；它不读取文件内容，也不替 Agent 做转码。
+
+`alive_agents` 表示 Heartbeat 当前认为活着的 Agent。`capability_index` 用于快速定位声明了某能力的 Agent。`load` 是 Registry 本地的运行时负载视图。
 
 ## 不变量
 
@@ -89,7 +99,7 @@ Registry 必须维护这些不变量：
 - `AgentTimedOut` 不删除 Agent，只从可发现集合移除
 - `AgentRecovered` 只恢复已注册且未 deregister 的 Agent
 - `register()` 只更新基础信息，不更新能力索引
-- `declare_capabilities()` 覆盖已有能力集合时，必须先移除旧能力索引，再插入新能力索引
+- `declare_capabilities()` 覆盖已有能力集合时，必须先完整校验能力和 contract，再移除旧能力索引并插入新能力索引
 
 ## 核心原语
 
@@ -216,6 +226,35 @@ current_load < capability.max_concurrency
 
 如果调用方设置 `include_busy = true`，可以返回满载 Agent，但候选项必须带上 `current_load`，由买方 Agent 自己决策。
 
+## Artifact 协议契约扩展
+
+当前 `Capability` 包含能力名、并发上限和可选 Artifact 协议契约：
+
+```rust
+pub struct Capability {
+    pub name: CapabilityName,
+    pub max_concurrency: u32,
+    pub contract: Option<CapabilityContract>,
+}
+
+pub struct CapabilityContract {
+    pub input_profiles: Vec<MediaProfileId>,
+    pub output_profiles: Vec<MediaProfileId>,
+}
+```
+
+示例：
+
+```text
+video.review
+  input_profiles:  ["video.mp4.h264-aac.v1"]
+  output_profiles: ["application.vnd.agent.review-verdict-json.v1"]
+```
+
+Registry 只保存和发现这些契约，不负责校验文件内容，也不负责转码。发起 Agent 根据 `output_profiles -> input_profiles` 做链路兼容匹配；不兼容时选择 transformer Agent。
+
+能力声明失败不能部分更新索引。实现上先完整校验 `Vec<Capability>`，包括 contract 内 profile 是否受支持和是否重复，再移除旧索引并写入新索引。
+
 ## 错误处理
 
 ```rust
@@ -223,6 +262,8 @@ pub enum RegistryError {
     EmptyCapabilityList,
     DuplicateCapability(CapabilityName),
     ZeroMaxConcurrency(CapabilityName),
+    DuplicateMediaProfile(MediaProfileId),
+    UnsupportedMediaProfile(MediaProfileId),
     AgentNotFound(AgentId),
     AgentDeregistered(AgentId),
     LoadExceedsCapacity { agent_id: AgentId, current: u32, max: u32 },
@@ -233,7 +274,7 @@ pub enum RegistryError {
 
 重复注册同一个 Agent 是合法操作，语义是替换基础信息，不影响已有能力声明、负载和 Heartbeat alive 状态。
 
-能力声明失败不能部分更新索引。实现上先校验完整 `Vec<Capability>`，再移除旧索引并写入新索引。
+能力声明失败不能部分更新索引。实现上先校验完整 `Vec<Capability>`，包括能力名、并发上限、contract profile 是否受支持和是否重复，再移除旧索引并写入新索引。
 
 ## 服务层
 
@@ -273,6 +314,9 @@ pub enum RegistryCommand {
 - 空能力列表被拒绝
 - 重复能力被拒绝
 - `max_concurrency = 0` 被拒绝
+- capability contract 会随 discovery 返回
+- contract 内未知 media profile 被拒绝，且不污染旧索引
+- contract 内重复 media profile 被拒绝
 - 满载 Agent 默认不出现在 `discover()`
 - `include_busy = true` 时可以返回满载 Agent
 - 多 Agent 同能力发现只扫描该能力索引

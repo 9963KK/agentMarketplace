@@ -11,7 +11,7 @@ LiveSession / Assignment 负责记录任务中的当前运行批次和工作单�
 - 某个市场 Agent 承担了哪些 Assignment
 - 某个 Assignment 是否已提交、通过、拒绝或取消
 
-LiveSession 不保存链路顺序，不保存 artifact 内容，不做 Agent 选择，不做结算。它只给 Review / Settlement 提供稳定的 `assignment_id` 锚点。
+LiveSession 不保存链路顺序，不保存 artifact 内容，不做 Agent 选择，不做结算。它只给 Review / Settlement 提供稳定的 `assignment_id` 锚点，并用 `output_hash` 锚定 ArtifactManifest。
 
 ## 设计选择
 
@@ -74,6 +74,8 @@ pub struct Assignment {
 }
 ```
 
+`output_hash` 当前沿用公共类型名，语义是 `artifact_manifest_hash`。完整 ArtifactManifest 遵守 `design/artifact/overview.md`，由 Agent 之间传递或由生产 Agent 保存，平台只记录 hash。
+
 `sessions` 和 `assignments` 是真相源。三个索引用于快速查询：
 
 - `assignments_by_task`：任务维度的 Assignment 列表
@@ -125,7 +127,7 @@ create_session
 assign
   -> AssignmentStatus::Assigned
 
-submit_output
+submit_artifact / submit_output
   -> Assigned -> Submitted
 
 mark_approved
@@ -141,7 +143,11 @@ close_session
   -> Running -> Closed
 ```
 
-`submit_output()` 必须由承担该 Assignment 的 Agent 调用。`mark_approved()` 和 `mark_rejected()` 只接受 `Submitted` 状态。
+`submit_artifact()` 是 Agent-facing 完成入口，必须由承担该 Assignment 的 Agent 调用。它校验 ArtifactManifest 的 assignment、producer、manifest hash 和 media profile，然后只保存 manifest hash。
+
+`submit_output()` 是底层 raw hash 入口，语义同样是写入 `artifact_manifest_hash`。它保留给测试、迁移或调用方已经完成 Artifact 协议校验的场景。
+
+`mark_approved()` 和 `mark_rejected()` 只接受 `Submitted` 状态。
 
 `cancel_assignment()` 是底层状态操作，只校验 Assignment 存在和时间戳不倒退。Runtime 掉线清理只会取消 `Assigned` 状态，避免覆盖已经提交的输出。
 
@@ -170,7 +176,15 @@ impl LiveSessionCore {
         &mut self,
         assignment_id: &AssignmentId,
         agent_id: AgentId,
-        output_hash: OutputHash,
+        output_hash: OutputHash, // artifact_manifest_hash
+        at: Timestamp,
+    ) -> Result<(), LiveSessionError>;
+
+    pub fn submit_artifact(
+        &mut self,
+        assignment_id: &AssignmentId,
+        agent_id: AgentId,
+        manifest: ArtifactManifest,
         at: Timestamp,
     ) -> Result<(), LiveSessionError>;
 
@@ -210,8 +224,9 @@ impl LiveSessionCore {
 - 只有 `Running` session 可以新增 Assignment
 - `assign.task_id` 必须等于 session 的 `task_id`
 - Review Assignment 只能指向同任务内的 Execute Assignment
-- `submit_output.agent_id` 必须等于 Assignment 的 `agent_id`
-- `submit_output` 只能发生在 `Assigned`
+- `submit_artifact.agent_id` / `submit_output.agent_id` 必须等于 Assignment 的 `agent_id`
+- `submit_artifact` / `submit_output` 只能发生在 `Assigned`
+- `submit_artifact` 必须提交符合 Artifact Protocol 的 manifest
 - `mark_approved` / `mark_rejected` 只能发生在 `Submitted`
 - 所有写操作时间戳不能小于目标对象当前 `updated_at`
 - `assignments_by_*` 索引必须和 `assignments` 真相源保持一致
@@ -233,6 +248,8 @@ Review 用 `target_assignment_id` 和 `review_assignment_id` 记录 verdict。
 
 Settlement 用 `assignment_id` 和 `agent_id` 绑定托管资金。
 
+Artifact Protocol 用 `assignment_id` 绑定产物 manifest，LiveSession 只保存 manifest hash，不保存文件内容或 URL。
+
 Runtime 在 Agent 掉线时查询 `assignments_by_agent(agent_id)`，但只取消 `Assigned` 状态的 Assignment。
 
 ## 错误处理
@@ -245,6 +262,7 @@ pub enum LiveSessionError {
     AssignmentNotAssigned { assignment_id: AssignmentId, status: AssignmentStatus },
     AssignmentNotSubmitted { assignment_id: AssignmentId, status: AssignmentStatus },
     AgentMismatch { assignment_id: AssignmentId, expected: AgentId, actual: AgentId },
+    InvalidArtifact(ArtifactError),
     TargetAssignmentNotFound(AssignmentId),
     TargetAssignmentTaskMismatch {
         target_assignment_id: AssignmentId,
@@ -291,6 +309,13 @@ pub enum LiveSessionCommand {
         at: Timestamp,
         reply: oneshot::Sender<Result<(), LiveSessionError>>,
     },
+    SubmitArtifact {
+        assignment_id: AssignmentId,
+        agent_id: AgentId,
+        manifest: ArtifactManifest,
+        at: Timestamp,
+        reply: oneshot::Sender<Result<(), LiveSessionError>>,
+    },
     MarkApproved { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
     MarkRejected { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
     CancelAssignment { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
@@ -319,7 +344,8 @@ pub enum LiveSessionCommand {
 - assign Review 时拒绝非 Execute target
 - assign Review 时拒绝跨任务 target
 - submit output 校验承担 Agent
-- submit output 只能从 `Assigned` 进入 `Submitted`
+- submit artifact 校验 assignment / producer / media profile 并保存 manifest hash
+- submit artifact / output 只能从 `Assigned` 进入 `Submitted`
 - mark approved / rejected 只能处理 `Submitted`
 - close session 后拒绝新增 Assignment
 - cancel assignment 更新状态

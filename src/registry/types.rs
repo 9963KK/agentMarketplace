@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use crate::artifact::MediaProfileId;
 use crate::heartbeat::AgentId;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -64,9 +65,25 @@ impl AgentIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityContract {
+    pub input_profiles: Vec<MediaProfileId>,
+    pub output_profiles: Vec<MediaProfileId>,
+}
+
+impl CapabilityContract {
+    pub fn new(input_profiles: Vec<MediaProfileId>, output_profiles: Vec<MediaProfileId>) -> Self {
+        Self {
+            input_profiles,
+            output_profiles,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Capability {
     pub name: CapabilityName,
     pub max_concurrency: u32,
+    pub contract: Option<CapabilityContract>,
 }
 
 impl Capability {
@@ -74,7 +91,13 @@ impl Capability {
         Self {
             name: name.into(),
             max_concurrency,
+            contract: None,
         }
+    }
+
+    pub fn with_contract(mut self, contract: CapabilityContract) -> Self {
+        self.contract = Some(contract);
+        self
     }
 }
 
@@ -152,6 +175,8 @@ pub enum RegistryError {
     EmptyCapabilityList,
     DuplicateCapability(CapabilityName),
     ZeroMaxConcurrency(CapabilityName),
+    DuplicateMediaProfile(MediaProfileId),
+    UnsupportedMediaProfile(MediaProfileId),
     AgentNotFound(AgentId),
     AgentDeregistered(AgentId),
     LoadExceedsCapacity {
@@ -174,6 +199,12 @@ impl fmt::Display for RegistryError {
                     f,
                     "capability max concurrency must be greater than zero: {name}"
                 )
+            }
+            RegistryError::DuplicateMediaProfile(profile) => {
+                write!(f, "duplicate capability media profile: {profile}")
+            }
+            RegistryError::UnsupportedMediaProfile(profile) => {
+                write!(f, "unsupported capability media profile: {profile}")
             }
             RegistryError::AgentNotFound(agent_id) => {
                 write!(f, "agent not found: {agent_id}")

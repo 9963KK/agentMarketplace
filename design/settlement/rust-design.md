@@ -143,7 +143,7 @@ impl SettlementCore {
 
 `hold()` 会立即检查并扣减 `from_agent` 余额，避免后续 release / refund 凭空造钱。
 
-`active_holds_for_agent()` 返回和该 Agent 相关的所有 Active hold，包括 Agent 作为付款方或收款方的 hold。Runtime 掉线退款会额外过滤 `hold.agent_id == timed_out_agent`。
+`active_holds_for_agent()` 返回和该 Agent 相关的所有 Active hold，包括 Agent 作为付款方或收款方的 hold。Runtime 掉线退款会额外过滤 `hold.agent_id == timed_out_agent`，并且只退款本次 timeout 已取消 Assignment 对应的 hold。
 
 ## 资金生命周期
 
@@ -225,8 +225,10 @@ Review.submit()
   -> Settlement.release(hold_id, evidence, at)
 
 Heartbeat timeout
+  -> Runtime 取消该 Agent 名下 Assigned Assignment
   -> Runtime 查询 active_holds_for_agent(agent_id)
   -> Runtime 过滤 hold.agent_id == agent_id
+  -> Runtime 过滤 hold.assignment_id 已被本次 timeout 取消
   -> Settlement.refund(hold_id, at)
 ```
 

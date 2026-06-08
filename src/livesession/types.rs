@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
+use crate::artifact::ArtifactError;
 use crate::heartbeat::AgentId;
 use crate::types::{AssignmentId, OutputHash, SessionId, TaskId, Timestamp};
 
@@ -70,6 +71,7 @@ pub enum LiveSessionError {
         expected: AgentId,
         actual: AgentId,
     },
+    InvalidArtifact(ArtifactError),
     TargetAssignmentNotFound(AssignmentId),
     TargetAssignmentTaskMismatch {
         target_assignment_id: AssignmentId,
@@ -128,6 +130,9 @@ impl fmt::Display for LiveSessionError {
                 f,
                 "agent mismatch for assignment {assignment_id}: expected={expected}, actual={actual}"
             ),
+            LiveSessionError::InvalidArtifact(error) => {
+                write!(f, "invalid assignment artifact: {error}")
+            }
             LiveSessionError::TargetAssignmentNotFound(assignment_id) => {
                 write!(f, "target assignment not found: {assignment_id}")
             }

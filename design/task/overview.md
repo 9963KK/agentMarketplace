@@ -69,8 +69,10 @@ task.add_participant(task_1, R2, t1)
 
 ```
 Heartbeat: AgentTimedOut { agent_id: B }
+  -> LiveSession.assignments_by_agent(B)
+  -> LiveSession.cancel_assignment(assigned_assignment_id)
   -> Settlement.active_holds_for_agent(B)
-  -> Settlement.refund(...)
+  -> Settlement.refund(cancelled_assignment_hold)
   -> Task.remove_participant(task_1, B, t2)
   -> Task.add_participant(task_1, C, t3)
 ```

@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod heartbeat;
 pub mod livesession;
 pub mod registry;

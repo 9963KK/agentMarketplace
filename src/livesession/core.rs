@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::artifact::{ArtifactManifest, validate_manifest_submission};
 use crate::heartbeat::AgentId;
 use crate::types::{AssignmentId, OutputHash, SessionId, TaskId, Timestamp};
 
@@ -147,6 +148,24 @@ impl LiveSessionCore {
         self.touch_session(&session_id, at)?;
 
         Ok(())
+    }
+
+    pub fn submit_artifact(
+        &mut self,
+        assignment_id: &AssignmentId,
+        agent_id: AgentId,
+        manifest: ArtifactManifest,
+        at: Timestamp,
+    ) -> Result<(), LiveSessionError> {
+        let manifest_hash = validate_manifest_submission(&manifest, assignment_id, &agent_id)
+            .map_err(LiveSessionError::InvalidArtifact)?;
+
+        self.submit_output(
+            assignment_id,
+            agent_id,
+            OutputHash::from(manifest_hash.to_string()),
+            at,
+        )
     }
 
     pub fn mark_approved(
@@ -385,6 +404,10 @@ impl LiveSessionCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{
+        ArtifactError, ArtifactFile, ArtifactKind, ArtifactManifest, HashDigest, MediaProfileId,
+        seal_manifest,
+    };
 
     fn agent(id: &str) -> AgentId {
         AgentId::from(id)
@@ -396,6 +419,36 @@ mod tests {
 
     fn output(value: &str) -> OutputHash {
         OutputHash::from(value)
+    }
+
+    fn hash(value: u8) -> HashDigest {
+        HashDigest::from_sha256_hex(format!("{value:064x}")).unwrap()
+    }
+
+    fn text_manifest(
+        artifact_id: &str,
+        task_id: TaskId,
+        assignment_id: AssignmentId,
+        producer_agent_id: AgentId,
+        at: Timestamp,
+    ) -> ArtifactManifest {
+        let file = ArtifactFile::new(
+            "https://agent.example/report.md",
+            hash(1),
+            "text/markdown",
+            "text.markdown.utf8.v1",
+            120,
+        );
+        seal_manifest(ArtifactManifest::new(
+            artifact_id,
+            task_id,
+            assignment_id,
+            producer_agent_id,
+            ArtifactKind::Single,
+            vec![file],
+            at,
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -558,6 +611,142 @@ mod tests {
         let assignment = core.get_assignment(&assignment_id).unwrap();
         assert_eq!(assignment.status, AssignmentStatus::Submitted);
         assert_eq!(assignment.output_hash, Some(output("hash-1")));
+    }
+
+    #[test]
+    fn submit_artifact_validates_and_stores_manifest_hash() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        let manifest = text_manifest(
+            "artifact-1",
+            task("task-1"),
+            assignment_id.clone(),
+            agent("executor"),
+            Timestamp(3),
+        );
+        let manifest_hash = manifest.manifest_hash.clone().unwrap();
+
+        core.submit_artifact(&assignment_id, agent("executor"), manifest, Timestamp(4))
+            .unwrap();
+
+        let assignment = core.get_assignment(&assignment_id).unwrap();
+        assert_eq!(assignment.status, AssignmentStatus::Submitted);
+        assert_eq!(
+            assignment.output_hash,
+            Some(OutputHash::from(manifest_hash.to_string()))
+        );
+    }
+
+    #[test]
+    fn submit_artifact_rejects_assignment_mismatch() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        let manifest = text_manifest(
+            "artifact-1",
+            task("task-1"),
+            AssignmentId::from("other-assignment"),
+            agent("executor"),
+            Timestamp(3),
+        );
+
+        assert_eq!(
+            core.submit_artifact(&assignment_id, agent("executor"), manifest, Timestamp(4),)
+                .unwrap_err(),
+            LiveSessionError::InvalidArtifact(ArtifactError::AssignmentMismatch {
+                expected: assignment_id,
+                actual: AssignmentId::from("other-assignment")
+            })
+        );
+    }
+
+    #[test]
+    fn submit_artifact_rejects_producer_mismatch() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        let manifest = text_manifest(
+            "artifact-1",
+            task("task-1"),
+            assignment_id.clone(),
+            agent("executor"),
+            Timestamp(3),
+        );
+
+        assert_eq!(
+            core.submit_artifact(&assignment_id, agent("other"), manifest, Timestamp(4))
+                .unwrap_err(),
+            LiveSessionError::InvalidArtifact(ArtifactError::ProducerMismatch {
+                expected: agent("other"),
+                actual: agent("executor")
+            })
+        );
+    }
+
+    #[test]
+    fn submit_artifact_rejects_invalid_media_profile() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        let file = ArtifactFile::new(
+            "https://agent.example/blob.bin",
+            hash(1),
+            "application/octet-stream",
+            "unknown.profile.v1",
+            120,
+        );
+        let manifest = ArtifactManifest::new(
+            "artifact-1",
+            task("task-1"),
+            assignment_id.clone(),
+            agent("executor"),
+            ArtifactKind::Single,
+            vec![file],
+            Timestamp(3),
+        )
+        .with_manifest_hash(hash(2));
+
+        assert_eq!(
+            core.submit_artifact(&assignment_id, agent("executor"), manifest, Timestamp(4),)
+                .unwrap_err(),
+            LiveSessionError::InvalidArtifact(ArtifactError::UnsupportedMediaProfile {
+                index: 0,
+                profile: MediaProfileId::from("unknown.profile.v1")
+            })
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ LiveSession 是任务当前运行批次。Assignment 是市场 Agent 被分配�
 | Assignment 是最小锚点 | 完成、审查、结算都绑定 assignment_id |
 | Review Agent 不是附属字段 | reviewer 也有自己的 Assignment |
 | 不保存链路顺序 | 不记录 A -> B -> C，不记录输入输出边 |
-| 不保存 artifact | 只记录 output_hash，不存内容 |
+| 不保存 artifact 内容 | 只记录 ArtifactManifest hash，不存内容 |
 
 ---
 
@@ -44,7 +44,7 @@ struct Assignment {
     agent_id: AgentId,
     kind: AssignmentKind,
     status: AssignmentStatus,
-    output_hash: Option<OutputHash>,
+    output_hash: Option<OutputHash>, // 语义是 artifact_manifest_hash
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -93,7 +93,8 @@ task_1
 | `create_session(task_id, at)` | 创建当前运行批次 |
 | `close_session(session_id, at)` | 关闭运行批次 |
 | `assign(task_id, session_id, agent_id, kind, at)` → `AssignmentId` | 创建 Assignment |
-| `submit_output(assignment_id, agent_id, output_hash, at)` | Assignment 完成并提交 output hash |
+| `submit_artifact(assignment_id, agent_id, manifest, at)` | Assignment 完成并提交 ArtifactManifest |
+| `submit_output(assignment_id, agent_id, output_hash, at)` | 底层 raw hash 写入入口，语义是 ArtifactManifest hash |
 | `mark_approved(assignment_id, at)` | 标记 Assignment 审查通过 |
 | `mark_rejected(assignment_id, at)` | 标记 Assignment 审查失败 |
 | `cancel_assignment(assignment_id, at)` | 取消 Assignment |
@@ -108,7 +109,7 @@ task_1
 平台不能凭空知道 Agent 完成了工作。完成必须由承担该 Assignment 的 Agent 提交：
 
 ```text
-submit_output(assignment_id, agent_id, output_hash)
+submit_artifact(assignment_id, agent_id, manifest)
 ```
 
 校验：
@@ -116,9 +117,16 @@ submit_output(assignment_id, agent_id, output_hash)
 - `assignment_id` 存在
 - `agent_id == assignment.agent_id`
 - Assignment 仍处于 `Assigned`
-- `output_hash` 不为空
+- `manifest.assignment_id == assignment_id`
+- `manifest.producer_agent_id == agent_id`
+- `manifest_hash` 与规范化 manifest 匹配
+- manifest 内文件符合平台支持的 Artifact Media Profile
 
-执行 Assignment 的输出是业务产物 hash。Review Assignment 的输出可以是 verdict hash 或审查报告 hash；具体 verdict 仍由 Review 组件记录。
+LiveSession 校验完整 ArtifactManifest 后，只把 `manifest_hash` 写入 `output_hash`。`submit_output()` 仍保留为底层 raw hash 原语，用于测试、迁移或调用方已经完成协议校验的场景。
+
+执行 Assignment 的输出是 ArtifactManifest。Review Assignment 的输出可以是 verdict manifest 或审查报告 manifest；具体 verdict 仍由 Review 组件记录。
+
+ArtifactManifest 遵守 `design/artifact/overview.md` 的协议共识。平台不保存 manifest 背后的文件内容，生产 Agent 或社区存储网络负责保存内容和提供 `uri`。
 
 ---
 
@@ -202,7 +210,7 @@ Task.add_participant(task_id, assignment.agent_id)
 |------|------|
 | 链路顺序 | 发布者 Agent 自己管 |
 | 上下游依赖 | 发布者 Agent 自己管 |
-| artifact 内容存储 | Agent 自己存 |
+| artifact 内容存储 | Agent 自己或社区存储网络保存 |
 | 自动选择 Agent | 发布者 Agent 通过 Registry 选择 |
 | 自动判断是否通过 | 发布者 Agent 或后续 Policy |
 | 自动放款 | Settlement 执行，触发者提供 evidence |

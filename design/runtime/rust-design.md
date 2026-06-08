@@ -121,12 +121,13 @@ sink 内部调用 `Runtime.handle_heartbeat_event_at(event, clock.now())`。如�
 ```text
 HeartbeatEvent::AgentTimedOut { agent_id }
   -> Registry.mark_timed_out(agent_id)
-  -> Settlement.active_holds_for_agent(agent_id)
-  -> filter hold.agent_id == agent_id
-  -> Settlement.refund(hold_id)
   -> LiveSession.assignments_by_agent(agent_id)
   -> filter assignment.status == Assigned
   -> LiveSession.cancel_assignment(assignment_id)
+  -> Settlement.active_holds_for_agent(agent_id)
+  -> filter hold.agent_id == agent_id
+  -> filter hold.assignment_id was cancelled above
+  -> Settlement.refund(hold_id)
   -> Task.active_tasks_by_agent(agent_id)
   -> Task.remove_participant(task_id, agent_id)
 ```
@@ -134,7 +135,7 @@ HeartbeatEvent::AgentTimedOut { agent_id }
 语义：
 
 - Registry 只标记不可发现，不注销 Agent
-- Settlement 只退款绑定到掉线 Agent 工作单元的 Active hold
+- Settlement 只退款绑定到掉线 Agent 且本次已取消 Assignment 的 Active hold
 - Agent 作为付款方的 hold 不会因为付款方掉线被自动退款
 - LiveSession 只取消 `Assigned` 状态，保留已 `Submitted` 输出
 - Task 只从当前参与者集合移除 Agent，不删除历史参与记录
@@ -252,7 +253,7 @@ Task.complete()
 ## 测试策略
 
 - timeout event 标记 registry 不可发现
-- timeout event refund 绑定到掉线 Agent 的 active hold
+- timeout event refund 绑定到掉线 Agent 且仍处于 `Assigned` 的 active hold
 - timeout event 不 refund 仅作为付款方相关的 hold
 - timeout event cancel `Assigned` assignment
 - timeout event 不 cancel `Submitted` assignment
