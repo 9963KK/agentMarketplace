@@ -30,6 +30,7 @@ Runtime 只做平台红线的延伸：活跃检测后的清理动作。其他任
 Heartbeat: AgentTimedOut { agent_id }
   -> Registry.mark_timed_out(agent_id)
   -> Settlement.active_holds_for_agent(agent_id)
+  -> filter hold.agent_id == agent_id
   -> Settlement.refund(hold_id)
   -> LiveSession.assignments_by_agent(agent_id)
   -> LiveSession.cancel_assignment(assignment_id)
@@ -40,8 +41,8 @@ Heartbeat: AgentTimedOut { agent_id }
 语义：
 
 - Registry 只标记不可发现，不注销 Agent。
-- Settlement 退款所有该 Agent 名下的 Active hold。
-- LiveSession 取消该 Agent 名下仍在运行的 Assignment。
+- Settlement 只退款 `hold.agent_id == agent_id` 的 Active hold，也就是绑定到掉线 Agent 工作单元的托管款；Agent 作为付款方的 hold 不会因为付款方掉线被自动退款。
+- LiveSession 只取消该 Agent 名下 `Assigned` 状态的 Assignment；已 `Submitted` 的输出保留，继续交给 review / settlement 流程处理。
 - Task 只从当前参与者集合移除该 Agent，不删除历史参与记录。
 - Runtime 不判断这个 Agent 是 executor 还是 reviewer。
 
