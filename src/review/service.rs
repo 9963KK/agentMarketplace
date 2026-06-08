@@ -3,8 +3,7 @@ use std::fmt;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::heartbeat::AgentId;
-use crate::types::{OutputHash, TaskId, Timestamp};
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 use super::ReviewCore;
 use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
@@ -15,16 +14,15 @@ const DEFAULT_COMMAND_BUFFER: usize = 128;
 pub enum ReviewCommand {
     Request {
         task_id: TaskId,
-        executor_id: AgentId,
-        output_hash: OutputHash,
-        allowed_reviewers: Vec<AgentId>,
+        target_assignment_id: AssignmentId,
+        review_assignment_ids: Vec<AssignmentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
         reply: oneshot::Sender<Result<ReviewId, ReviewError>>,
     },
     Submit {
         review_id: ReviewId,
-        reviewer_id: AgentId,
+        review_assignment_id: AssignmentId,
         verdict: Verdict,
         submitted_at: Timestamp,
         reply: oneshot::Sender<Result<(), ReviewError>>,
@@ -32,6 +30,10 @@ pub enum ReviewCommand {
     Collect {
         review_id: ReviewId,
         reply: oneshot::Sender<Option<Vec<VerdictRecord>>>,
+    },
+    CollectByAssignment {
+        assignment_id: AssignmentId,
+        reply: oneshot::Sender<Vec<ReviewSession>>,
     },
     CollectByTask {
         task_id: TaskId,
@@ -51,18 +53,16 @@ impl ReviewHandle {
     pub async fn request(
         &self,
         task_id: impl Into<TaskId>,
-        executor_id: impl Into<AgentId>,
-        output_hash: impl Into<OutputHash>,
-        allowed_reviewers: Vec<AgentId>,
+        target_assignment_id: impl Into<AssignmentId>,
+        review_assignment_ids: Vec<AssignmentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
     ) -> Result<ReviewId, ReviewServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ReviewCommand::Request {
             task_id: task_id.into(),
-            executor_id: executor_id.into(),
-            output_hash: output_hash.into(),
-            allowed_reviewers,
+            target_assignment_id: target_assignment_id.into(),
+            review_assignment_ids,
             criteria,
             created_at,
             reply,
@@ -77,14 +77,14 @@ impl ReviewHandle {
     pub async fn submit(
         &self,
         review_id: impl Into<ReviewId>,
-        reviewer_id: impl Into<AgentId>,
+        review_assignment_id: impl Into<AssignmentId>,
         verdict: Verdict,
         submitted_at: Timestamp,
     ) -> Result<(), ReviewServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ReviewCommand::Submit {
             review_id: review_id.into(),
-            reviewer_id: reviewer_id.into(),
+            review_assignment_id: review_assignment_id.into(),
             verdict,
             submitted_at,
             reply,
@@ -103,6 +103,21 @@ impl ReviewHandle {
         let (reply, response) = oneshot::channel();
         self.send(ReviewCommand::Collect {
             review_id: review_id.into(),
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| ReviewServiceError::ResponseDropped)
+    }
+
+    pub async fn collect_by_assignment(
+        &self,
+        assignment_id: impl Into<AssignmentId>,
+    ) -> Result<Vec<ReviewSession>, ReviewServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(ReviewCommand::CollectByAssignment {
+            assignment_id: assignment_id.into(),
             reply,
         })
         .await?;
@@ -208,18 +223,16 @@ impl ReviewService {
         match command {
             ReviewCommand::Request {
                 task_id,
-                executor_id,
-                output_hash,
-                allowed_reviewers,
+                target_assignment_id,
+                review_assignment_ids,
                 criteria,
                 created_at,
                 reply,
             } => {
                 let _ = reply.send(self.core.request(
                     task_id,
-                    executor_id,
-                    output_hash,
-                    allowed_reviewers,
+                    target_assignment_id,
+                    review_assignment_ids,
                     criteria,
                     created_at,
                 ));
@@ -227,20 +240,28 @@ impl ReviewService {
             }
             ReviewCommand::Submit {
                 review_id,
-                reviewer_id,
+                review_assignment_id,
                 verdict,
                 submitted_at,
                 reply,
             } => {
-                let _ =
-                    reply.send(
-                        self.core
-                            .submit(&review_id, reviewer_id, verdict, submitted_at),
-                    );
+                let _ = reply.send(self.core.submit(
+                    &review_id,
+                    review_assignment_id,
+                    verdict,
+                    submitted_at,
+                ));
                 None
             }
             ReviewCommand::Collect { review_id, reply } => {
                 let _ = reply.send(self.core.collect(&review_id));
+                None
+            }
+            ReviewCommand::CollectByAssignment {
+                assignment_id,
+                reply,
+            } => {
+                let _ = reply.send(self.core.collect_by_assignment(&assignment_id));
                 None
             }
             ReviewCommand::CollectByTask { task_id, reply } => {
@@ -258,8 +279,8 @@ mod tests {
 
     use super::*;
 
-    fn agent(id: &str) -> AgentId {
-        AgentId::from(id)
+    fn assignment(id: &str) -> AssignmentId {
+        AssignmentId::from(id)
     }
 
     fn verdict(kind: VerdictKind, score_bps: u16) -> Verdict {
@@ -277,9 +298,8 @@ mod tests {
         let review_id = review
             .request(
                 "task-1",
-                "executor-1",
-                "hash-1",
-                vec![agent("reviewer-1")],
+                "execute-1",
+                vec![assignment("review-1")],
                 ReviewCriteria::plain_text("check output"),
                 Timestamp(1),
             )
@@ -288,7 +308,7 @@ mod tests {
         review
             .submit(
                 review_id.clone(),
-                "reviewer-1",
+                "review-1",
                 verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )
@@ -297,11 +317,13 @@ mod tests {
 
         let verdicts = review.collect(review_id.clone()).await.unwrap().unwrap();
         let by_task = review.collect_by_task("task-1").await.unwrap();
+        let by_assignment = review.collect_by_assignment("execute-1").await.unwrap();
 
         assert_eq!(verdicts.len(), 1);
         assert_eq!(by_task.len(), 1);
+        assert_eq!(by_assignment.len(), 1);
         assert_eq!(by_task[0].review_id, review_id);
-        assert_eq!(by_task[0].executor_id, agent("executor-1"));
+        assert_eq!(by_task[0].target_assignment_id, assignment("execute-1"));
 
         review.shutdown().await.unwrap();
     }
@@ -313,9 +335,8 @@ mod tests {
         let error = review
             .request(
                 "task-1",
-                "executor-1",
-                "hash-1",
-                vec![agent("reviewer-1")],
+                "execute-1",
+                vec![assignment("review-1")],
                 ReviewCriteria::plain_text("x".repeat(MAX_CRITERIA_BYTES + 1)),
                 Timestamp(1),
             )
@@ -343,8 +364,7 @@ mod tests {
             review
                 .request(
                     "task-1",
-                    "executor-1",
-                    "hash-1",
+                    "execute-1",
                     Vec::new(),
                     ReviewCriteria::plain_text("check output"),
                     Timestamp(1),

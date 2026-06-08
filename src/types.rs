@@ -46,6 +46,8 @@ macro_rules! id_type {
 }
 
 id_type!(TaskId, "task id", EmptyTaskId);
+id_type!(SessionId, "session id", EmptySessionId);
+id_type!(AssignmentId, "assignment id", EmptyAssignmentId);
 id_type!(OutputHash, "output hash", EmptyOutputHash);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -54,6 +56,8 @@ pub struct Timestamp(pub u64);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommonTypeError {
     EmptyTaskId,
+    EmptySessionId,
+    EmptyAssignmentId,
     EmptyOutputHash,
 }
 
@@ -61,6 +65,8 @@ impl fmt::Display for CommonTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CommonTypeError::EmptyTaskId => f.write_str("task id must not be empty"),
+            CommonTypeError::EmptySessionId => f.write_str("session id must not be empty"),
+            CommonTypeError::EmptyAssignmentId => f.write_str("assignment id must not be empty"),
             CommonTypeError::EmptyOutputHash => f.write_str("output hash must not be empty"),
         }
     }

@@ -1,8 +1,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::heartbeat::AgentId;
-use crate::types::{OutputHash, TaskId, Timestamp};
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReviewId(String);
@@ -76,9 +75,8 @@ impl ReviewCriteria {
 pub struct ReviewSession {
     pub review_id: ReviewId,
     pub task_id: TaskId,
-    pub executor_id: AgentId,
-    pub output_hash: OutputHash,
-    pub allowed_reviewers: Vec<AgentId>,
+    pub target_assignment_id: AssignmentId,
+    pub review_assignment_ids: Vec<AssignmentId>,
     pub criteria: ReviewCriteria,
     pub verdicts: Vec<VerdictRecord>,
     pub created_at: Timestamp,
@@ -87,7 +85,8 @@ pub struct ReviewSession {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerdictRecord {
     pub review_id: ReviewId,
-    pub reviewer_id: AgentId,
+    pub review_assignment_id: AssignmentId,
+    pub target_assignment_id: AssignmentId,
     pub verdict: Verdict,
     pub submitted_at: Timestamp,
 }
@@ -121,15 +120,15 @@ pub enum ReviewError {
         actual_bytes: usize,
     },
     InvalidScore(u16),
-    DuplicateReviewer(AgentId),
+    DuplicateReviewAssignment(AssignmentId),
     ReviewNotFound(ReviewId),
-    ReviewerNotAllowed {
+    ReviewAssignmentNotAllowed {
         review_id: ReviewId,
-        reviewer_id: AgentId,
+        review_assignment_id: AssignmentId,
     },
     DuplicateVerdict {
         review_id: ReviewId,
-        reviewer_id: AgentId,
+        review_assignment_id: AssignmentId,
     },
 }
 
@@ -155,23 +154,23 @@ impl fmt::Display for ReviewError {
             ReviewError::InvalidScore(score) => {
                 write!(f, "review score must be <= 10000: {score}")
             }
-            ReviewError::DuplicateReviewer(agent_id) => {
-                write!(f, "duplicate reviewer: {agent_id}")
+            ReviewError::DuplicateReviewAssignment(assignment_id) => {
+                write!(f, "duplicate review assignment: {assignment_id}")
             }
             ReviewError::ReviewNotFound(review_id) => write!(f, "review not found: {review_id}"),
-            ReviewError::ReviewerNotAllowed {
+            ReviewError::ReviewAssignmentNotAllowed {
                 review_id,
-                reviewer_id,
+                review_assignment_id,
             } => write!(
                 f,
-                "reviewer {reviewer_id} is not allowed for review {review_id}"
+                "review assignment {review_assignment_id} is not allowed for review {review_id}"
             ),
             ReviewError::DuplicateVerdict {
                 review_id,
-                reviewer_id,
+                review_assignment_id,
             } => write!(
                 f,
-                "duplicate verdict for review {review_id} by reviewer {reviewer_id}"
+                "duplicate verdict for review {review_id} by review assignment {review_assignment_id}"
             ),
         }
     }

@@ -2,7 +2,8 @@ use std::error::Error;
 use std::fmt;
 
 use crate::heartbeat::AgentId;
-use crate::types::{TaskId, Timestamp};
+use crate::review::ReviewId;
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct HoldId(String);
@@ -52,14 +53,9 @@ pub struct Hold {
     pub from_agent: AgentId,
     pub amount: u64,
     pub task_id: TaskId,
-    pub role: HoldRole,
+    pub assignment_id: AssignmentId,
+    pub agent_id: AgentId,
     pub status: HoldStatus,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HoldRole {
-    Executor(AgentId),
-    Reviewer(AgentId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,12 +67,15 @@ pub enum HoldStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReleaseEvidence {
-    ExecutorReviewPassed {
+    AssignmentOutputAccepted {
         task_id: TaskId,
+        assignment_id: AssignmentId,
+        review_ids: Vec<ReviewId>,
     },
-    ReviewerVerdictSubmitted {
+    ReviewSubmitted {
         task_id: TaskId,
-        reviewer_id: AgentId,
+        assignment_id: AssignmentId,
+        review_id: ReviewId,
     },
 }
 
@@ -84,6 +83,7 @@ pub enum ReleaseEvidence {
 pub struct LedgerEntry {
     pub hold_id: Option<HoldId>,
     pub task_id: Option<TaskId>,
+    pub assignment_id: Option<AssignmentId>,
     pub amount: u64,
     pub kind: LedgerEntryKind,
     pub at: Timestamp,
@@ -91,10 +91,19 @@ pub struct LedgerEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LedgerEntryKind {
-    Deposited { agent_id: AgentId },
-    HoldCreated { from_agent: AgentId, role: HoldRole },
-    Released { to_agent: AgentId },
-    Refunded { to_agent: AgentId },
+    Deposited {
+        agent_id: AgentId,
+    },
+    HoldCreated {
+        from_agent: AgentId,
+        agent_id: AgentId,
+    },
+    Released {
+        to_agent: AgentId,
+    },
+    Refunded {
+        to_agent: AgentId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,6 +117,7 @@ pub enum SettlementOutcome {
 pub enum SettlementError {
     EmptyHoldId,
     ZeroAmount,
+    EmptyReviewEvidence,
     InsufficientBalance {
         agent_id: AgentId,
         available: Balance,
@@ -129,6 +139,9 @@ impl fmt::Display for SettlementError {
         match self {
             SettlementError::EmptyHoldId => f.write_str("hold id must not be empty"),
             SettlementError::ZeroAmount => f.write_str("amount must be greater than zero"),
+            SettlementError::EmptyReviewEvidence => {
+                f.write_str("release evidence must include at least one review")
+            }
             SettlementError::InsufficientBalance {
                 agent_id,
                 available,

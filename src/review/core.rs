@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::heartbeat::AgentId;
-use crate::types::{OutputHash, TaskId, Timestamp};
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
 
@@ -13,6 +12,7 @@ const MAX_SCORE_BPS: u16 = 10_000;
 pub struct ReviewCore {
     sessions: HashMap<ReviewId, ReviewSession>,
     sessions_by_task: HashMap<TaskId, Vec<ReviewId>>,
+    sessions_by_assignment: HashMap<AssignmentId, Vec<ReviewId>>,
     next_review: u64,
 }
 
@@ -24,13 +24,12 @@ impl ReviewCore {
     pub fn request(
         &mut self,
         task_id: TaskId,
-        executor_id: AgentId,
-        output_hash: OutputHash,
-        allowed_reviewers: Vec<AgentId>,
+        target_assignment_id: AssignmentId,
+        review_assignment_ids: Vec<AssignmentId>,
         criteria: ReviewCriteria,
         created_at: Timestamp,
     ) -> Result<ReviewId, ReviewError> {
-        validate_reviewers(&allowed_reviewers)?;
+        validate_review_assignments(&review_assignment_ids)?;
         validate_criteria(&criteria)?;
 
         let review_id = self.next_review_id();
@@ -39,9 +38,8 @@ impl ReviewCore {
             ReviewSession {
                 review_id: review_id.clone(),
                 task_id: task_id.clone(),
-                executor_id,
-                output_hash,
-                allowed_reviewers,
+                target_assignment_id: target_assignment_id.clone(),
+                review_assignment_ids,
                 criteria,
                 verdicts: Vec::new(),
                 created_at,
@@ -51,6 +49,10 @@ impl ReviewCore {
             .entry(task_id)
             .or_default()
             .push(review_id.clone());
+        self.sessions_by_assignment
+            .entry(target_assignment_id)
+            .or_default()
+            .push(review_id.clone());
 
         Ok(review_id)
     }
@@ -58,7 +60,7 @@ impl ReviewCore {
     pub fn submit(
         &mut self,
         review_id: &ReviewId,
-        reviewer_id: AgentId,
+        review_assignment_id: AssignmentId,
         verdict: Verdict,
         submitted_at: Timestamp,
     ) -> Result<(), ReviewError> {
@@ -68,26 +70,30 @@ impl ReviewCore {
             .sessions
             .get_mut(review_id)
             .ok_or_else(|| ReviewError::ReviewNotFound(review_id.clone()))?;
-        if !session.allowed_reviewers.contains(&reviewer_id) {
-            return Err(ReviewError::ReviewerNotAllowed {
+        if !session
+            .review_assignment_ids
+            .contains(&review_assignment_id)
+        {
+            return Err(ReviewError::ReviewAssignmentNotAllowed {
                 review_id: review_id.clone(),
-                reviewer_id,
+                review_assignment_id,
             });
         }
         if session
             .verdicts
             .iter()
-            .any(|record| record.reviewer_id == reviewer_id)
+            .any(|record| record.review_assignment_id == review_assignment_id)
         {
             return Err(ReviewError::DuplicateVerdict {
                 review_id: review_id.clone(),
-                reviewer_id,
+                review_assignment_id,
             });
         }
 
         session.verdicts.push(VerdictRecord {
             review_id: review_id.clone(),
-            reviewer_id,
+            review_assignment_id,
+            target_assignment_id: session.target_assignment_id.clone(),
             verdict,
             submitted_at,
         });
@@ -100,15 +106,12 @@ impl ReviewCore {
             .map(|session| session.verdicts.clone())
     }
 
-    pub fn collect_by_task(&self, task_id: &TaskId) -> Vec<ReviewSession> {
-        let Some(review_ids) = self.sessions_by_task.get(task_id) else {
-            return Vec::new();
-        };
+    pub fn collect_by_assignment(&self, assignment_id: &AssignmentId) -> Vec<ReviewSession> {
+        self.sessions_from_index(self.sessions_by_assignment.get(assignment_id))
+    }
 
-        review_ids
-            .iter()
-            .filter_map(|review_id| self.sessions.get(review_id).cloned())
-            .collect()
+    pub fn collect_by_task(&self, task_id: &TaskId) -> Vec<ReviewSession> {
+        self.sessions_from_index(self.sessions_by_task.get(task_id))
     }
 
     pub fn get(&self, review_id: &ReviewId) -> Option<&ReviewSession> {
@@ -119,17 +122,29 @@ impl ReviewCore {
         self.sessions.len()
     }
 
+    fn sessions_from_index(&self, review_ids: Option<&Vec<ReviewId>>) -> Vec<ReviewSession> {
+        let Some(review_ids) = review_ids else {
+            return Vec::new();
+        };
+        review_ids
+            .iter()
+            .filter_map(|review_id| self.sessions.get(review_id).cloned())
+            .collect()
+    }
+
     fn next_review_id(&mut self) -> ReviewId {
         self.next_review += 1;
         ReviewId::new(format!("review-{}", self.next_review))
     }
 }
 
-fn validate_reviewers(reviewers: &[AgentId]) -> Result<(), ReviewError> {
+fn validate_review_assignments(review_assignment_ids: &[AssignmentId]) -> Result<(), ReviewError> {
     let mut seen = HashSet::new();
-    for reviewer in reviewers {
-        if !seen.insert(reviewer.clone()) {
-            return Err(ReviewError::DuplicateReviewer(reviewer.clone()));
+    for assignment_id in review_assignment_ids {
+        if !seen.insert(assignment_id.clone()) {
+            return Err(ReviewError::DuplicateReviewAssignment(
+                assignment_id.clone(),
+            ));
         }
     }
 
@@ -171,20 +186,15 @@ fn validate_verdict(verdict: &Verdict) -> Result<(), ReviewError> {
 #[cfg(test)]
 mod tests {
     use crate::review::{CriteriaFormat, VerdictKind};
-    use crate::types::OutputHash;
 
     use super::*;
-
-    fn agent(id: &str) -> AgentId {
-        AgentId::from(id)
-    }
 
     fn task(id: &str) -> TaskId {
         TaskId::from(id)
     }
 
-    fn output_hash(value: &str) -> OutputHash {
-        OutputHash::from(value)
+    fn assignment(id: &str) -> AssignmentId {
+        AssignmentId::from(id)
     }
 
     fn criteria() -> ReviewCriteria {
@@ -202,9 +212,8 @@ mod tests {
     fn request_review(core: &mut ReviewCore) -> ReviewId {
         core.request(
             task("task-1"),
-            agent("executor-1"),
-            output_hash("hash-1"),
-            vec![agent("reviewer-1"), agent("reviewer-2")],
+            assignment("execute-1"),
+            vec![assignment("review-1"), assignment("review-2")],
             criteria(),
             Timestamp(1),
         )
@@ -212,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn request_creates_session_and_task_index() {
+    fn request_creates_session_and_indexes() {
         let mut core = ReviewCore::new();
 
         let review_id = request_review(&mut core);
@@ -221,40 +230,46 @@ mod tests {
         assert_eq!(core.session_count(), 1);
         assert_eq!(session.review_id, review_id);
         assert_eq!(session.task_id, task("task-1"));
-        assert_eq!(session.executor_id, agent("executor-1"));
-        assert_eq!(session.output_hash, output_hash("hash-1"));
-        assert_eq!(session.allowed_reviewers.len(), 2);
+        assert_eq!(session.target_assignment_id, assignment("execute-1"));
+        assert_eq!(session.review_assignment_ids.len(), 2);
         assert_eq!(session.criteria.format, CriteriaFormat::PlainText);
         assert_eq!(core.collect_by_task(&task("task-1")).len(), 1);
+        assert_eq!(
+            core.collect_by_assignment(&assignment("execute-1")).len(),
+            1
+        );
     }
 
     #[test]
-    fn request_allows_empty_reviewers_but_rejects_duplicate_reviewers() {
+    fn request_allows_empty_review_assignments_but_rejects_duplicates() {
         let mut core = ReviewCore::new();
 
         let review_id = core
             .request(
                 task("task-1"),
-                agent("executor-1"),
-                output_hash("hash-1"),
+                assignment("execute-1"),
                 Vec::new(),
                 criteria(),
                 Timestamp(1),
             )
             .unwrap();
-        assert!(core.get(&review_id).unwrap().allowed_reviewers.is_empty());
+        assert!(
+            core.get(&review_id)
+                .unwrap()
+                .review_assignment_ids
+                .is_empty()
+        );
 
         assert_eq!(
             core.request(
                 task("task-2"),
-                agent("executor-1"),
-                output_hash("hash-2"),
-                vec![agent("reviewer-1"), agent("reviewer-1")],
+                assignment("execute-2"),
+                vec![assignment("review-1"), assignment("review-1")],
                 criteria(),
                 Timestamp(1),
             )
             .unwrap_err(),
-            ReviewError::DuplicateReviewer(agent("reviewer-1"))
+            ReviewError::DuplicateReviewAssignment(assignment("review-1"))
         );
     }
 
@@ -265,9 +280,8 @@ mod tests {
         assert_eq!(
             core.request(
                 task("task-1"),
-                agent("executor-1"),
-                output_hash("hash-1"),
-                vec![agent("reviewer-1")],
+                assignment("execute-1"),
+                vec![assignment("review-1")],
                 ReviewCriteria::plain_text(" "),
                 Timestamp(1),
             )
@@ -275,20 +289,19 @@ mod tests {
             ReviewError::EmptyCriteria
         );
 
-        let large = "x".repeat(MAX_CRITERIA_BYTES + 1);
+        let body = "x".repeat(MAX_CRITERIA_BYTES + 1);
         assert_eq!(
             core.request(
                 task("task-1"),
-                agent("executor-1"),
-                output_hash("hash-1"),
-                vec![agent("reviewer-1")],
-                ReviewCriteria::json(large),
+                assignment("execute-1"),
+                vec![assignment("review-1")],
+                ReviewCriteria::plain_text(body),
                 Timestamp(1),
             )
             .unwrap_err(),
             ReviewError::CriteriaTooLarge {
                 max_bytes: MAX_CRITERIA_BYTES,
-                actual_bytes: MAX_CRITERIA_BYTES + 1,
+                actual_bytes: MAX_CRITERIA_BYTES + 1
             }
         );
     }
@@ -300,44 +313,46 @@ mod tests {
 
         core.submit(
             &review_id,
-            agent("reviewer-1"),
-            verdict(VerdictKind::Passed, 9_500),
+            assignment("review-1"),
+            verdict(VerdictKind::Passed, 9_000),
             Timestamp(2),
         )
         .unwrap();
 
         let verdicts = core.collect(&review_id).unwrap();
         assert_eq!(verdicts.len(), 1);
-        assert_eq!(verdicts[0].reviewer_id, agent("reviewer-1"));
-        assert_eq!(verdicts[0].submitted_at, Timestamp(2));
+        assert_eq!(verdicts[0].review_id, review_id);
+        assert_eq!(verdicts[0].review_assignment_id, assignment("review-1"));
+        assert_eq!(verdicts[0].target_assignment_id, assignment("execute-1"));
     }
 
     #[test]
-    fn submit_rejects_unknown_or_unauthorized_review() {
+    fn submit_rejects_unknown_or_unauthorized_review_assignment() {
         let mut core = ReviewCore::new();
         let review_id = request_review(&mut core);
 
         assert_eq!(
             core.submit(
                 &ReviewId::from("missing"),
-                agent("reviewer-1"),
-                verdict(VerdictKind::Passed, 10_000),
+                assignment("review-1"),
+                verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )
             .unwrap_err(),
             ReviewError::ReviewNotFound(ReviewId::from("missing"))
         );
+
         assert_eq!(
             core.submit(
                 &review_id,
-                agent("intruder"),
-                verdict(VerdictKind::Passed, 10_000),
+                assignment("review-3"),
+                verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )
             .unwrap_err(),
-            ReviewError::ReviewerNotAllowed {
+            ReviewError::ReviewAssignmentNotAllowed {
                 review_id,
-                reviewer_id: agent("intruder"),
+                review_assignment_id: assignment("review-3")
             }
         );
     }
@@ -349,8 +364,8 @@ mod tests {
 
         core.submit(
             &review_id,
-            agent("reviewer-1"),
-            verdict(VerdictKind::Passed, 10_000),
+            assignment("review-1"),
+            verdict(VerdictKind::Passed, 9_000),
             Timestamp(2),
         )
         .unwrap();
@@ -358,14 +373,14 @@ mod tests {
         assert_eq!(
             core.submit(
                 &review_id,
-                agent("reviewer-1"),
-                verdict(VerdictKind::Failed, 0),
+                assignment("review-1"),
+                verdict(VerdictKind::Failed, 1_000),
                 Timestamp(3),
             )
             .unwrap_err(),
             ReviewError::DuplicateVerdict {
                 review_id,
-                reviewer_id: agent("reviewer-1"),
+                review_assignment_id: assignment("review-1")
             }
         );
     }
@@ -378,7 +393,7 @@ mod tests {
         assert_eq!(
             core.submit(
                 &review_id,
-                agent("reviewer-1"),
+                assignment("review-1"),
                 verdict(VerdictKind::Passed, 10_001),
                 Timestamp(2),
             )
@@ -386,19 +401,17 @@ mod tests {
             ReviewError::InvalidScore(10_001)
         );
 
-        let mut large_feedback = verdict(VerdictKind::Failed, 0);
-        large_feedback.feedback = "x".repeat(MAX_FEEDBACK_BYTES + 1);
+        let large = Verdict {
+            kind: VerdictKind::Passed,
+            score_bps: 9_000,
+            feedback: "x".repeat(MAX_FEEDBACK_BYTES + 1),
+        };
         assert_eq!(
-            core.submit(
-                &review_id,
-                agent("reviewer-1"),
-                large_feedback,
-                Timestamp(2),
-            )
-            .unwrap_err(),
+            core.submit(&review_id, assignment("review-1"), large, Timestamp(2))
+                .unwrap_err(),
             ReviewError::FeedbackTooLarge {
                 max_bytes: MAX_FEEDBACK_BYTES,
-                actual_bytes: MAX_FEEDBACK_BYTES + 1,
+                actual_bytes: MAX_FEEDBACK_BYTES + 1
             }
         );
     }

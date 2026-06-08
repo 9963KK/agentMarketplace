@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use crate::heartbeat::AgentId;
-use crate::types::{TaskId, Timestamp};
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 use super::types::{
-    Balance, Hold, HoldId, HoldRole, HoldStatus, LedgerEntry, LedgerEntryKind, ReleaseEvidence,
+    Balance, Hold, HoldId, HoldStatus, LedgerEntry, LedgerEntryKind, ReleaseEvidence,
     SettlementError,
 };
 
@@ -35,6 +35,7 @@ impl SettlementCore {
         self.ledger.push(LedgerEntry {
             hold_id: None,
             task_id: None,
+            assignment_id: None,
             amount,
             kind: LedgerEntryKind::Deposited { agent_id },
             at,
@@ -48,7 +49,8 @@ impl SettlementCore {
         from_agent: AgentId,
         amount: u64,
         task_id: TaskId,
-        role: HoldRole,
+        assignment_id: AssignmentId,
+        agent_id: AgentId,
         at: Timestamp,
     ) -> Result<HoldId, SettlementError> {
         if amount == 0 {
@@ -72,15 +74,20 @@ impl SettlementCore {
                 from_agent: from_agent.clone(),
                 amount,
                 task_id: task_id.clone(),
-                role: role.clone(),
+                assignment_id: assignment_id.clone(),
+                agent_id: agent_id.clone(),
                 status: HoldStatus::Active,
             },
         );
         self.ledger.push(LedgerEntry {
             hold_id: Some(hold_id.clone()),
             task_id: Some(task_id),
+            assignment_id: Some(assignment_id),
             amount,
-            kind: LedgerEntryKind::HoldCreated { from_agent, role },
+            kind: LedgerEntryKind::HoldCreated {
+                from_agent,
+                agent_id,
+            },
             at,
         });
 
@@ -90,15 +97,16 @@ impl SettlementCore {
     pub fn release(
         &mut self,
         hold_id: &HoldId,
-        to_agent: AgentId,
         evidence: ReleaseEvidence,
         at: Timestamp,
     ) -> Result<(), SettlementError> {
         let hold = self.active_hold(hold_id)?;
-        validate_release_evidence(hold, &to_agent, &evidence)?;
+        validate_release_evidence(hold, &evidence)?;
 
         let amount = hold.amount;
         let task_id = hold.task_id.clone();
+        let assignment_id = hold.assignment_id.clone();
+        let to_agent = hold.agent_id.clone();
         self.credit(to_agent.clone(), amount)?;
         let hold = self
             .holds
@@ -108,6 +116,7 @@ impl SettlementCore {
         self.ledger.push(LedgerEntry {
             hold_id: Some(hold_id.clone()),
             task_id: Some(task_id),
+            assignment_id: Some(assignment_id),
             amount,
             kind: LedgerEntryKind::Released { to_agent },
             at,
@@ -121,6 +130,7 @@ impl SettlementCore {
         let from_agent = hold.from_agent.clone();
         let amount = hold.amount;
         let task_id = hold.task_id.clone();
+        let assignment_id = hold.assignment_id.clone();
 
         self.credit(from_agent.clone(), amount)?;
         let hold = self
@@ -131,6 +141,7 @@ impl SettlementCore {
         self.ledger.push(LedgerEntry {
             hold_id: Some(hold_id.clone()),
             task_id: Some(task_id),
+            assignment_id: Some(assignment_id),
             amount,
             kind: LedgerEntryKind::Refunded {
                 to_agent: from_agent,
@@ -154,7 +165,7 @@ impl SettlementCore {
             .values()
             .filter(|hold| {
                 hold.status == HoldStatus::Active
-                    && (hold.from_agent == *agent_id || hold_payee(hold) == Some(agent_id))
+                    && (hold.from_agent == *agent_id || hold.agent_id == *agent_id)
             })
             .cloned()
             .collect()
@@ -208,30 +219,25 @@ impl SettlementCore {
     }
 }
 
-fn hold_payee(hold: &Hold) -> Option<&AgentId> {
-    match &hold.role {
-        HoldRole::Executor(executor_id) => Some(executor_id),
-        HoldRole::Reviewer(reviewer_id) => Some(reviewer_id),
-    }
-}
-
 fn validate_release_evidence(
     hold: &Hold,
-    to_agent: &AgentId,
     evidence: &ReleaseEvidence,
 ) -> Result<(), SettlementError> {
-    match (&hold.role, evidence) {
-        (HoldRole::Executor(executor_id), ReleaseEvidence::ExecutorReviewPassed { task_id })
-            if hold.task_id == *task_id && executor_id == to_agent => {}
-        (
-            HoldRole::Reviewer(reviewer_id),
-            ReleaseEvidence::ReviewerVerdictSubmitted {
-                task_id,
-                reviewer_id: evidence_reviewer,
-            },
-        ) if hold.task_id == *task_id
-            && reviewer_id == evidence_reviewer
-            && reviewer_id == to_agent => {}
+    match evidence {
+        ReleaseEvidence::AssignmentOutputAccepted {
+            task_id,
+            assignment_id,
+            review_ids,
+        } if hold.task_id == *task_id && hold.assignment_id == *assignment_id => {
+            if review_ids.is_empty() {
+                return Err(SettlementError::EmptyReviewEvidence);
+            }
+        }
+        ReleaseEvidence::ReviewSubmitted {
+            task_id,
+            assignment_id,
+            review_id: _,
+        } if hold.task_id == *task_id && hold.assignment_id == *assignment_id => {}
         _ => {
             return Err(SettlementError::ReleaseEvidenceMismatch {
                 hold_id: hold.hold_id.clone(),
@@ -244,6 +250,8 @@ fn validate_release_evidence(
 
 #[cfg(test)]
 mod tests {
+    use crate::review::ReviewId;
+
     use super::*;
 
     fn agent(id: &str) -> AgentId {
@@ -252,6 +260,30 @@ mod tests {
 
     fn task(id: &str) -> TaskId {
         TaskId::from(id)
+    }
+
+    fn assignment(id: &str) -> AssignmentId {
+        AssignmentId::from(id)
+    }
+
+    fn review(id: &str) -> ReviewId {
+        ReviewId::from(id)
+    }
+
+    fn accepted(assignment_id: &str) -> ReleaseEvidence {
+        ReleaseEvidence::AssignmentOutputAccepted {
+            task_id: task("task-1"),
+            assignment_id: assignment(assignment_id),
+            review_ids: vec![review("review-1")],
+        }
+    }
+
+    fn review_submitted(assignment_id: &str) -> ReleaseEvidence {
+        ReleaseEvidence::ReviewSubmitted {
+            task_id: task("task-1"),
+            assignment_id: assignment(assignment_id),
+            review_id: review("review-1"),
+        }
     }
 
     #[test]
@@ -282,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_creates_active_hold_and_ledger_entry() {
+    fn hold_creates_active_assignment_hold_and_debits_payer() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
 
@@ -291,7 +323,8 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap();
@@ -299,6 +332,8 @@ mod tests {
         let hold = core.get_hold(&hold_id).unwrap();
         assert_eq!(hold.status, HoldStatus::Active);
         assert_eq!(hold.amount, 100);
+        assert_eq!(hold.assignment_id, assignment("execute-1"));
+        assert_eq!(hold.agent_id, agent("executor"));
         assert_eq!(core.balance(&agent("publisher")), 0);
         assert_eq!(core.ledger().len(), 2);
     }
@@ -312,7 +347,8 @@ mod tests {
                 agent("publisher"),
                 0,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap_err(),
@@ -330,7 +366,8 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap_err(),
@@ -345,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn release_executor_requires_executor_review_passed_evidence() {
+    fn release_assignment_hold_credits_bound_agent() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let hold_id = core
@@ -353,35 +390,14 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap();
 
-        assert_eq!(
-            core.release(
-                &hold_id,
-                agent("other-executor"),
-                ReleaseEvidence::ExecutorReviewPassed {
-                    task_id: task("task-1"),
-                },
-                Timestamp(2),
-            )
-            .unwrap_err(),
-            SettlementError::ReleaseEvidenceMismatch {
-                hold_id: hold_id.clone()
-            }
-        );
-
-        core.release(
-            &hold_id,
-            agent("executor"),
-            ReleaseEvidence::ExecutorReviewPassed {
-                task_id: task("task-1"),
-            },
-            Timestamp(2),
-        )
-        .unwrap();
+        core.release(&hold_id, accepted("execute-1"), Timestamp(2))
+            .unwrap();
 
         assert_eq!(core.balance(&agent("executor")), 100);
         assert_eq!(core.balance(&agent("publisher")), 0);
@@ -393,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn release_reviewer_requires_matching_reviewer_evidence() {
+    fn release_review_hold_accepts_review_submitted_evidence() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 25, Timestamp(0)).unwrap();
         let hold_id = core
@@ -401,43 +417,25 @@ mod tests {
                 agent("publisher"),
                 25,
                 task("task-1"),
-                HoldRole::Reviewer(agent("reviewer-1")),
+                assignment("review-assignment-1"),
+                agent("reviewer-1"),
                 Timestamp(1),
             )
             .unwrap();
 
-        assert_eq!(
-            core.release(
-                &hold_id,
-                agent("reviewer-2"),
-                ReleaseEvidence::ReviewerVerdictSubmitted {
-                    task_id: task("task-1"),
-                    reviewer_id: agent("reviewer-1"),
-                },
-                Timestamp(2),
-            )
-            .unwrap_err(),
-            SettlementError::ReleaseEvidenceMismatch {
-                hold_id: hold_id.clone()
-            }
-        );
-
         core.release(
             &hold_id,
-            agent("reviewer-1"),
-            ReleaseEvidence::ReviewerVerdictSubmitted {
-                task_id: task("task-1"),
-                reviewer_id: agent("reviewer-1"),
-            },
-            Timestamp(3),
+            review_submitted("review-assignment-1"),
+            Timestamp(2),
         )
         .unwrap();
+
         assert_eq!(core.balance(&agent("reviewer-1")), 25);
         assert_eq!(core.balance(&agent("publisher")), 0);
     }
 
     #[test]
-    fn release_rejects_wrong_task_or_role_evidence() {
+    fn release_rejects_wrong_assignment_or_empty_review_evidence() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let hold_id = core
@@ -445,22 +443,32 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap();
 
         assert_eq!(
+            core.release(&hold_id, accepted("execute-2"), Timestamp(2))
+                .unwrap_err(),
+            SettlementError::ReleaseEvidenceMismatch {
+                hold_id: hold_id.clone()
+            }
+        );
+
+        assert_eq!(
             core.release(
                 &hold_id,
-                agent("executor"),
-                ReleaseEvidence::ExecutorReviewPassed {
-                    task_id: task("task-2"),
+                ReleaseEvidence::AssignmentOutputAccepted {
+                    task_id: task("task-1"),
+                    assignment_id: assignment("execute-1"),
+                    review_ids: Vec::new(),
                 },
                 Timestamp(2),
             )
             .unwrap_err(),
-            SettlementError::ReleaseEvidenceMismatch { hold_id }
+            SettlementError::EmptyReviewEvidence
         );
     }
 
@@ -473,7 +481,8 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap();
@@ -496,19 +505,13 @@ mod tests {
                 agent("publisher"),
                 100,
                 task("task-1"),
-                HoldRole::Executor(agent("executor")),
+                assignment("execute-1"),
+                agent("executor"),
                 Timestamp(1),
             )
             .unwrap();
-        core.release(
-            &released,
-            agent("executor"),
-            ReleaseEvidence::ExecutorReviewPassed {
-                task_id: task("task-1"),
-            },
-            Timestamp(2),
-        )
-        .unwrap();
+        core.release(&released, accepted("execute-1"), Timestamp(2))
+            .unwrap();
 
         assert_eq!(
             core.refund(&released, Timestamp(3)).unwrap_err(),
@@ -520,14 +523,15 @@ mod tests {
     }
 
     #[test]
-    fn active_holds_for_agent_returns_payer_and_reviewer_holds() {
+    fn active_holds_for_agent_returns_payer_and_payee_holds() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 125, Timestamp(0)).unwrap();
         core.hold(
             agent("publisher"),
             100,
             task("task-1"),
-            HoldRole::Executor(agent("executor")),
+            assignment("execute-1"),
+            agent("executor"),
             Timestamp(1),
         )
         .unwrap();
@@ -535,7 +539,8 @@ mod tests {
             agent("publisher"),
             25,
             task("task-1"),
-            HoldRole::Reviewer(agent("reviewer-1")),
+            assignment("review-1"),
+            agent("reviewer-1"),
             Timestamp(1),
         )
         .unwrap();

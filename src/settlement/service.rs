@@ -4,12 +4,10 @@ use std::fmt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::heartbeat::AgentId;
-use crate::types::{TaskId, Timestamp};
+use crate::types::{AssignmentId, TaskId, Timestamp};
 
 use super::SettlementCore;
-use super::types::{
-    Balance, Hold, HoldId, HoldRole, LedgerEntry, ReleaseEvidence, SettlementError,
-};
+use super::types::{Balance, Hold, HoldId, LedgerEntry, ReleaseEvidence, SettlementError};
 
 const DEFAULT_COMMAND_BUFFER: usize = 128;
 
@@ -25,13 +23,13 @@ pub enum SettlementCommand {
         from_agent: AgentId,
         amount: u64,
         task_id: TaskId,
-        role: HoldRole,
+        assignment_id: AssignmentId,
+        agent_id: AgentId,
         at: Timestamp,
         reply: oneshot::Sender<Result<HoldId, SettlementError>>,
     },
     Release {
         hold_id: HoldId,
-        to_agent: AgentId,
         evidence: ReleaseEvidence,
         at: Timestamp,
         reply: oneshot::Sender<Result<(), SettlementError>>,
@@ -92,7 +90,8 @@ impl SettlementHandle {
         from_agent: impl Into<AgentId>,
         amount: u64,
         task_id: impl Into<TaskId>,
-        role: HoldRole,
+        assignment_id: impl Into<AssignmentId>,
+        agent_id: impl Into<AgentId>,
         at: Timestamp,
     ) -> Result<HoldId, SettlementServiceError> {
         let (reply, response) = oneshot::channel();
@@ -100,7 +99,8 @@ impl SettlementHandle {
             from_agent: from_agent.into(),
             amount,
             task_id: task_id.into(),
-            role,
+            assignment_id: assignment_id.into(),
+            agent_id: agent_id.into(),
             at,
             reply,
         })
@@ -114,14 +114,12 @@ impl SettlementHandle {
     pub async fn release(
         &self,
         hold_id: impl Into<HoldId>,
-        to_agent: impl Into<AgentId>,
         evidence: ReleaseEvidence,
         at: Timestamp,
     ) -> Result<(), SettlementServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(SettlementCommand::Release {
             hold_id: hold_id.into(),
-            to_agent: to_agent.into(),
             evidence,
             at,
             reply,
@@ -297,21 +295,28 @@ impl SettlementService {
                 from_agent,
                 amount,
                 task_id,
-                role,
+                assignment_id,
+                agent_id,
                 at,
                 reply,
             } => {
-                let _ = reply.send(self.core.hold(from_agent, amount, task_id, role, at));
+                let _ = reply.send(self.core.hold(
+                    from_agent,
+                    amount,
+                    task_id,
+                    assignment_id,
+                    agent_id,
+                    at,
+                ));
                 None
             }
             SettlementCommand::Release {
                 hold_id,
-                to_agent,
                 evidence,
                 at,
                 reply,
             } => {
-                let _ = reply.send(self.core.release(&hold_id, to_agent, evidence, at));
+                let _ = reply.send(self.core.release(&hold_id, evidence, at));
                 None
             }
             SettlementCommand::Refund { hold_id, at, reply } => {
@@ -341,14 +346,16 @@ impl SettlementService {
 
 #[cfg(test)]
 mod tests {
+    use crate::review::ReviewId;
+
     use super::*;
 
-    fn task(id: &str) -> TaskId {
-        TaskId::from(id)
-    }
-
-    fn agent(id: &str) -> AgentId {
-        AgentId::from(id)
+    fn accepted(assignment_id: &str) -> ReleaseEvidence {
+        ReleaseEvidence::AssignmentOutputAccepted {
+            task_id: TaskId::from("task-1"),
+            assignment_id: AssignmentId::from(assignment_id),
+            review_ids: vec![ReviewId::from("review-1")],
+        }
     }
 
     #[tokio::test]
@@ -364,20 +371,14 @@ mod tests {
                 "publisher",
                 100,
                 "task-1",
-                HoldRole::Executor(agent("executor")),
+                "execute-1",
+                "executor",
                 Timestamp(1),
             )
             .await
             .unwrap();
         settlement
-            .release(
-                hold_id.clone(),
-                "executor",
-                ReleaseEvidence::ExecutorReviewPassed {
-                    task_id: task("task-1"),
-                },
-                Timestamp(2),
-            )
+            .release(hold_id.clone(), accepted("execute-1"), Timestamp(2))
             .await
             .unwrap();
 
@@ -406,7 +407,8 @@ mod tests {
                 "publisher",
                 100,
                 "task-1",
-                HoldRole::Executor(agent("executor")),
+                "execute-1",
+                "executor",
                 Timestamp(1),
             )
             .await
@@ -434,7 +436,8 @@ mod tests {
                 "publisher",
                 0,
                 "task-1",
-                HoldRole::Executor(agent("executor")),
+                "execute-1",
+                "executor",
                 Timestamp(1),
             )
             .await
@@ -460,7 +463,8 @@ mod tests {
                     "publisher",
                     100,
                     "task-1",
-                    HoldRole::Executor(agent("executor")),
+                    "execute-1",
+                    "executor",
                     Timestamp(1),
                 )
                 .await
