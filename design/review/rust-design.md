@@ -65,9 +65,16 @@ ReviewSession 是创建时快照。任务链路由发起 Agent 自己管理，�
 pub struct VerdictRecord {
     pub review_id: ReviewId,
     pub review_assignment_id: AssignmentId,
+    pub artifact_hash: OutputHash,
     pub target_assignment_id: AssignmentId,
     pub verdict: Verdict,
     pub submitted_at: Timestamp,
+}
+
+pub struct ReviewArtifactEvidence {
+    pub review_assignment_id: AssignmentId,
+    pub status: AssignmentStatus,
+    pub output_hash: Option<OutputHash>,
 }
 
 pub struct Verdict {
@@ -103,7 +110,7 @@ impl ReviewCore {
     pub fn submit(
         &mut self,
         review_id: &ReviewId,
-        review_assignment_id: AssignmentId,
+        artifact: ReviewArtifactEvidence,
         verdict: Verdict,
         submitted_at: Timestamp,
     ) -> Result<(), ReviewError>;
@@ -121,7 +128,9 @@ impl ReviewCore {
 - `ReviewSession.review_id` 唯一
 - `target_assignment_id` 是被审查 Assignment
 - `review_assignment_ids` 内不能重复
-- `submit.review_assignment_id` 必须属于 `review_assignment_ids`
+- `submit.artifact.review_assignment_id` 必须属于 `review_assignment_ids`
+- Review Assignment 必须已经在 LiveSession 中提交 artifact，即 `status == Submitted` 且 `output_hash.is_some()`
+- VerdictRecord 必须保存 Review Assignment 的 `artifact_hash`
 - 同一 `review_id + review_assignment_id` 第一版只能提交一次
 - verdict 只追加，不覆盖，不撤销
 - `criteria.body` 不能为空且不能超过上限
@@ -134,6 +143,7 @@ ReviewCore 第一版不反查 LiveSession 校验 assignment 类型。调用方�
 - `target_assignment_id` 指向 Execute Assignment
 - `review_assignment_ids` 指向 Review Assignment
 - Review Assignment 的 `target_assignment_id` 与本 session 一致
+- 提交 verdict 前先从 LiveSession 读取 Review Assignment 快照，构造 `ReviewArtifactEvidence`
 
 ## 大小限制
 
@@ -179,6 +189,11 @@ pub enum ReviewError {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
     },
+    ReviewArtifactNotSubmitted {
+        review_assignment_id: AssignmentId,
+        status: AssignmentStatus,
+    },
+    MissingReviewArtifactHash(AssignmentId),
     DuplicateVerdict {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
@@ -195,6 +210,7 @@ pub enum ReviewError {
 - request 拒绝重复 review_assignment_id
 - submit 拒绝未知 review
 - submit 拒绝未授权 review_assignment_id
+- submit 拒绝未提交 artifact 的 review_assignment_id
 - submit 拒绝重复 verdict
 - submit 拒绝 `score_bps > 10000`
 - collect 返回不可变快照

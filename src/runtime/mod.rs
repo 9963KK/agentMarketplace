@@ -13,7 +13,7 @@ mod tests {
     use crate::heartbeat::{AgentId, HeartbeatConfig, HeartbeatEvent, HeartbeatService};
     use crate::livesession::{AssignmentKind, AssignmentStatus, LiveSessionService};
     use crate::registry::{AgentIdentity, Capability, DiscoveryQuery, RegistryService};
-    use crate::settlement::{HoldStatus, SettlementService};
+    use crate::settlement::{HoldKind, HoldRequest, HoldStatus, SettlementService};
     use crate::task::TaskService;
     use crate::types::Timestamp;
 
@@ -67,11 +67,14 @@ mod tests {
             .unwrap();
         let hold_id = settlement
             .hold(
-                "publisher",
-                100,
-                task_id.clone(),
-                assignment_id.clone(),
-                "executor",
+                HoldRequest::new(
+                    AgentId::from("publisher"),
+                    100,
+                    task_id.clone(),
+                    assignment_id.clone(),
+                    AgentId::from("executor"),
+                    HoldKind::Execute,
+                ),
                 Timestamp(6),
             )
             .await
@@ -259,11 +262,14 @@ mod tests {
             .unwrap();
         let hold_id = settlement
             .hold(
-                "publisher",
-                100,
-                task_id,
-                assignment_id,
-                "executor",
+                HoldRequest::new(
+                    AgentId::from("publisher"),
+                    100,
+                    task_id,
+                    assignment_id,
+                    AgentId::from("executor"),
+                    HoldKind::Execute,
+                ),
                 Timestamp(5),
             )
             .await

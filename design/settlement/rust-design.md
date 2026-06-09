@@ -53,6 +53,15 @@ pub struct SettlementCore {
 
 pub type Balance = u64;
 
+pub struct HoldRequest {
+    pub from_agent: AgentId,
+    pub amount: u64,
+    pub task_id: TaskId,
+    pub assignment_id: AssignmentId,
+    pub agent_id: AgentId,
+    pub kind: HoldKind,
+}
+
 pub struct Hold {
     pub hold_id: HoldId,
     pub from_agent: AgentId,
@@ -60,7 +69,13 @@ pub struct Hold {
     pub task_id: TaskId,
     pub assignment_id: AssignmentId,
     pub agent_id: AgentId,
+    pub kind: HoldKind,
     pub status: HoldStatus,
+}
+
+pub enum HoldKind {
+    Execute,
+    Review,
 }
 
 pub enum HoldStatus {
@@ -96,6 +111,7 @@ pub enum ReleaseEvidence {
 - hold 必须存在且处于 `Active`
 - evidence 的 `task_id` 必须匹配 hold
 - evidence 的 `assignment_id` 必须匹配 hold
+- evidence 类型必须匹配 `HoldKind`
 - `AssignmentOutputAccepted.review_ids` 不能为空
 
 Settlement 不校验 Review 是否真的 Passed，也不校验 Review Assignment 是否真的提交。发布者 Agent 或后续 Policy 层负责做这些判断后再调用 `release()`。
@@ -113,11 +129,7 @@ impl SettlementCore {
 
     pub fn hold(
         &mut self,
-        from_agent: AgentId,
-        amount: u64,
-        task_id: TaskId,
-        assignment_id: AssignmentId,
-        agent_id: AgentId,
+        request: HoldRequest,
         at: Timestamp,
     ) -> Result<HoldId, SettlementError>;
 
@@ -152,7 +164,7 @@ deposit(publisher, 500)
   -> publisher.balance += 500
   -> ledger: Deposited
 
-hold(publisher, 200, task-1, assignment-1, executor)
+hold(HoldRequest { from_agent: publisher, amount: 200, task_id: task-1, assignment_id: assignment-1, agent_id: executor, kind: Execute })
   -> 检查 publisher.balance >= 200
   -> publisher.balance -= 200
   -> hold.status = Active
@@ -205,6 +217,8 @@ pub enum LedgerEntryKind {
 - `release()` 只给 `hold.agent_id` 加钱
 - `refund()` 只给 `hold.from_agent` 加钱
 - `release()` 和 `refund()` 只能处理 Active hold
+- `AssignmentOutputAccepted` 只能 release `HoldKind::Execute`
+- `ReviewSubmitted` 只能 release `HoldKind::Review`
 - Released / Refunded hold 不可再次变更
 - 所有余额加法必须防溢出
 - hold 创建失败不能部分扣款
@@ -218,7 +232,7 @@ Settlement 不反查其他组件：
 ```text
 LiveSession.assign()
   -> assignment_id
-  -> Settlement.hold(..., assignment_id, agent_id, ...)
+  -> Settlement.hold(HoldRequest { task_id, assignment_id, agent_id, kind, ... })
 
 Review.submit()
   -> 发布者 Agent 或 Policy 判断是否可 release
@@ -254,6 +268,11 @@ pub enum SettlementError {
     ReleaseEvidenceMismatch {
         hold_id: HoldId,
     },
+    HoldKindMismatch {
+        hold_id: HoldId,
+        expected: HoldKind,
+        actual: HoldKind,
+    },
     Overflow,
 }
 ```
@@ -271,11 +290,7 @@ pub enum SettlementCommand {
         reply: oneshot::Sender<Result<(), SettlementError>>,
     },
     Hold {
-        from_agent: AgentId,
-        amount: u64,
-        task_id: TaskId,
-        assignment_id: AssignmentId,
-        agent_id: AgentId,
+        request: HoldRequest,
         at: Timestamp,
         reply: oneshot::Sender<Result<HoldId, SettlementError>>,
     },

@@ -9,7 +9,7 @@
 | 原语 | 说明 |
 |------|------|
 | `deposit(agent, amount)` | 充值 |
-| `hold(from, amount, task_id, assignment_id, agent_id)` | 托管资金（扣余额） |
+| `hold(request)` | 托管资金（扣余额），request 内绑定任务、Assignment、收款 Agent 和 HoldKind |
 | `release(hold_id, evidence)` | 放款（需 evidence） |
 | `refund(hold_id)` | 退款（退回 from_agent） |
 | `balance(agent)` | 查询余额 |
@@ -24,6 +24,15 @@
 Settlement 不再只按 `task_id + role` 结算。每一笔托管资金必须绑定 `assignment_id`。
 
 ```rust
+struct HoldRequest {
+    from_agent: AgentId,
+    amount: u64,
+    task_id: TaskId,
+    assignment_id: AssignmentId,
+    agent_id: AgentId,
+    kind: HoldKind,
+}
+
 struct Hold {
     hold_id: HoldId,
     from_agent: AgentId,
@@ -31,7 +40,13 @@ struct Hold {
     task_id: TaskId,
     assignment_id: AssignmentId,
     agent_id: AgentId,
+    kind: HoldKind,
     status: HoldStatus,
+}
+
+enum HoldKind {
+    Execute,
+    Review,
 }
 ```
 
@@ -75,7 +90,12 @@ enum ReleaseEvidence {
 }
 ```
 
-第一版 Settlement 只校验 evidence 与 hold 的 `task_id / assignment_id` 匹配，以及 hold 仍处于 Active。是否真的全部 Passed，由发布者 Agent 或后续 Policy 判断后再调用 release。
+第一版 Settlement 校验 evidence 与 hold 的 `task_id / assignment_id` 匹配、hold 仍处于 Active，并校验 evidence 类型与 `HoldKind` 匹配：
+
+- `AssignmentOutputAccepted` 只能 release `Execute` hold
+- `ReviewSubmitted` 只能 release `Review` hold
+
+是否真的全部 Passed，由发布者 Agent 或后续 Policy 判断后再调用 release。
 
 后续如果要平台自动判定，可以引入 `SettlementPolicy`，但不放进第一版 SettlementCore。
 
@@ -87,7 +107,7 @@ enum ReleaseEvidence {
 deposit(publisher, 500)
   -> publisher.balance = 500
 
-hold(publisher, 200, task_1, exec_assignment_1, B)
+hold(HoldRequest { from_agent: publisher, amount: 200, task_id: task_1, assignment_id: exec_assignment_1, agent_id: B, kind: Execute })
   -> publisher.balance = 300
   -> hold Active
 
@@ -104,7 +124,7 @@ refund(hold)
 Review Agent 的结算：
 
 ```text
-hold(publisher, 20, task_1, review_assignment_1, R1)
+hold(HoldRequest { from_agent: publisher, amount: 20, task_id: task_1, assignment_id: review_assignment_1, agent_id: R1, kind: Review })
 
 R1 submit verdict
   -> release(hold, ReviewSubmitted { assignment_id = review_assignment_1 })

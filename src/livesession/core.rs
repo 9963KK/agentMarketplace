@@ -157,8 +157,15 @@ impl LiveSessionCore {
         manifest: ArtifactManifest,
         at: Timestamp,
     ) -> Result<(), LiveSessionError> {
-        let manifest_hash = validate_manifest_submission(&manifest, assignment_id, &agent_id)
-            .map_err(LiveSessionError::InvalidArtifact)?;
+        let task_id = self
+            .assignments
+            .get(assignment_id)
+            .ok_or_else(|| LiveSessionError::AssignmentNotFound(assignment_id.clone()))?
+            .task_id
+            .clone();
+        let manifest_hash =
+            validate_manifest_submission(&manifest, &task_id, assignment_id, &agent_id)
+                .map_err(LiveSessionError::InvalidArtifact)?;
 
         self.submit_output(
             assignment_id,
@@ -166,6 +173,38 @@ impl LiveSessionCore {
             OutputHash::from(manifest_hash.to_string()),
             at,
         )
+    }
+
+    pub fn cancel_if_assigned(
+        &mut self,
+        assignment_id: &AssignmentId,
+        at: Timestamp,
+    ) -> Result<bool, LiveSessionError> {
+        let assignment = self
+            .assignments
+            .get(assignment_id)
+            .ok_or_else(|| LiveSessionError::AssignmentNotFound(assignment_id.clone()))?;
+        if assignment.status != AssignmentStatus::Assigned {
+            return Ok(false);
+        }
+        if at < assignment.updated_at {
+            return Err(LiveSessionError::TimestampWentBackwards {
+                current: assignment.updated_at,
+                attempted: at,
+            });
+        }
+        let session_id = assignment.session_id.clone();
+        self.validate_session_timestamp(&session_id, at)?;
+
+        let assignment = self
+            .assignments
+            .get_mut(assignment_id)
+            .ok_or_else(|| LiveSessionError::AssignmentNotFound(assignment_id.clone()))?;
+        assignment.status = AssignmentStatus::Cancelled;
+        assignment.updated_at = at;
+        self.touch_session(&session_id, at)?;
+
+        Ok(true)
     }
 
     pub fn mark_approved(
@@ -287,6 +326,25 @@ impl LiveSessionCore {
                 status: session.status,
             });
         }
+        if at < session.updated_at {
+            return Err(LiveSessionError::TimestampWentBackwards {
+                current: session.updated_at,
+                attempted: at,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_session_timestamp(
+        &self,
+        session_id: &SessionId,
+        at: Timestamp,
+    ) -> Result<(), LiveSessionError> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| LiveSessionError::SessionNotFound(session_id.clone()))?;
         if at < session.updated_at {
             return Err(LiveSessionError::TimestampWentBackwards {
                 current: session.updated_at,
@@ -678,6 +736,37 @@ mod tests {
     }
 
     #[test]
+    fn submit_artifact_rejects_task_mismatch() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        let manifest = text_manifest(
+            "artifact-1",
+            task("task-2"),
+            assignment_id.clone(),
+            agent("executor"),
+            Timestamp(3),
+        );
+
+        assert_eq!(
+            core.submit_artifact(&assignment_id, agent("executor"), manifest, Timestamp(4),)
+                .unwrap_err(),
+            LiveSessionError::InvalidArtifact(ArtifactError::TaskMismatch {
+                expected: task("task-1"),
+                actual: task("task-2")
+            })
+        );
+    }
+
+    #[test]
     fn submit_artifact_rejects_producer_mismatch() {
         let mut core = LiveSessionCore::new();
         let session_id = core.create_session(task("task-1"), Timestamp(1));
@@ -746,6 +835,38 @@ mod tests {
                 index: 0,
                 profile: MediaProfileId::from("unknown.profile.v1")
             })
+        );
+    }
+
+    #[test]
+    fn cancel_if_assigned_does_not_cancel_submitted_assignment() {
+        let mut core = LiveSessionCore::new();
+        let session_id = core.create_session(task("task-1"), Timestamp(1));
+        let assignment_id = core
+            .assign(
+                task("task-1"),
+                &session_id,
+                agent("executor"),
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .unwrap();
+        core.submit_output(
+            &assignment_id,
+            agent("executor"),
+            output("hash-1"),
+            Timestamp(4),
+        )
+        .unwrap();
+
+        assert!(
+            !core
+                .cancel_if_assigned(&assignment_id, Timestamp(3))
+                .unwrap()
+        );
+        assert_eq!(
+            core.get_assignment(&assignment_id).unwrap().status,
+            AssignmentStatus::Submitted
         );
     }
 

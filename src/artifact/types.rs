@@ -305,6 +305,10 @@ pub enum ArtifactError {
         expected: AssignmentId,
         actual: AssignmentId,
     },
+    TaskMismatch {
+        expected: TaskId,
+        actual: TaskId,
+    },
     ProducerMismatch {
         expected: AgentId,
         actual: AgentId,
@@ -396,6 +400,10 @@ impl fmt::Display for ArtifactError {
             ArtifactError::AssignmentMismatch { expected, actual } => write!(
                 f,
                 "artifact assignment mismatch: expected={expected}, actual={actual}"
+            ),
+            ArtifactError::TaskMismatch { expected, actual } => write!(
+                f,
+                "artifact task mismatch: expected={expected}, actual={actual}"
             ),
             ArtifactError::ProducerMismatch { expected, actual } => write!(
                 f,

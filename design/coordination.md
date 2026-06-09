@@ -99,15 +99,15 @@ Capability {
      │                          │    livesession.create_session(task_1)
      │                          │    livesession.assign(Execute, B) → assignment_1
      │                          │    task.add_participant(task_1, B)
-     │                          │    settlement.hold(A, 200, task_1, assignment_1, B)
+     │                          │    settlement.hold(HoldRequest(A, 200, task_1, assignment_1, B, Execute))
      │                          │
      │── 组合原语选择 R1/R2 ───►│  调用方/业务层:
      │                          │    livesession.assign(Review, R1, target=1) → assignment_2
      │                          │    livesession.assign(Review, R2, target=1) → assignment_3
      │                          │    task.add_participant(task_1, R1)
      │                          │    task.add_participant(task_1, R2)
-     │                          │    settlement.hold(A, 30, task_1, assignment_2, R1)
-     │                          │    settlement.hold(A, 30, task_1, assignment_3, R2)
+     │                          │    settlement.hold(HoldRequest(A, 30, task_1, assignment_2, R1, Review))
+     │                          │    settlement.hold(HoldRequest(A, 30, task_1, assignment_3, R2, Review))
 
 
 阶段二: Execution（干活）
@@ -141,7 +141,7 @@ Capability {
      │                          │
      │── review.submit(         │
      │     review_id,           │
-     │     assignment_2,        │
+     │     artifact_evidence,   │
      │     verdict: Passed) ───►│  review: verdict 追加
      │                          │
      │                          │  settlement: R1 可 release（交稿即放款）
@@ -154,7 +154,7 @@ Capability {
      │     manifest) ──────────►│  livesession: assignment_3.status = Submitted
      │                          │
      │── review.submit(         │
-     │     assignment_3,        │
+     │     artifact_evidence,   │
      │     verdict: Failed) ───►│  review: verdict 追加
      │                          │
      │                          │  settlement: R2 可 release（交稿即放款）
@@ -195,7 +195,7 @@ Capability {
      │── 组合原语 replace_executor ──────►│  settlement.refund(execute_hold)
      │                                     │  task.remove_participant(B)
      │                                     │  livesession.assign(Execute, C) → assignment_4
-     │                                     │  settlement.hold(A, 200, task_1, assignment_4, C)
+     │                                     │  settlement.hold(HoldRequest(A, 200, task_1, assignment_4, C, Execute))
      │
      │  C 执行 → 审查 → Passed
      │

@@ -27,7 +27,7 @@ Review 不知道这些 Assignment 在完整链路中的先后关系。
 | 原语 | 说明 |
 |------|------|
 | `request(task_id, target_assignment_id, review_assignment_ids, criteria)` | 创建审阅会话 |
-| `submit(review_id, review_assignment_id, verdict)` | Review Agent 提交裁决 |
+| `submit(review_id, artifact_evidence, verdict)` | Review Agent 提交裁决，必须证明 Review Assignment 已提交 artifact |
 | `collect(review_id)` | 查单个会话的全部裁决 |
 | `collect_by_assignment(target_assignment_id)` | 查某目标 Assignment 的所有审阅会话 |
 | `collect_by_task(task_id)` | 查某任务下所有审阅会话 |
@@ -48,13 +48,14 @@ struct ReviewSession {
 struct VerdictRecord {
     review_id: ReviewId,
     review_assignment_id: AssignmentId,
+    artifact_hash: OutputHash,
     target_assignment_id: AssignmentId,
     verdict: Verdict,
     submitted_at: Timestamp,
 }
 ```
 
-`review_assignment_id` 对应审查 Agent 自己的工作。`target_assignment_id` 对应被审查的工作。
+`review_assignment_id` 对应审查 Agent 自己的工作。`target_assignment_id` 对应被审查的工作。`artifact_hash` 是 Review Assignment 在 LiveSession 中提交的 ArtifactManifest hash。
 
 ## Verdict
 
@@ -70,6 +71,7 @@ struct Verdict {
 
 ```text
 Review Agent 提交 verdict
+  -> 必须先 submit_artifact(review_assignment_id, ...)
   -> Review Assignment 完成
   -> reviewer hold 可以 release
 

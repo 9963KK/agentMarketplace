@@ -9,11 +9,11 @@ use agent_marketplace::registry::{
     AgentIdentity, Capability, DiscoveryQuery, RegistryHandle, RegistryService,
 };
 use agent_marketplace::review::{
-    ReviewCriteria, ReviewHandle, ReviewService, Verdict, VerdictKind,
+    ReviewArtifactEvidence, ReviewCriteria, ReviewHandle, ReviewService, Verdict, VerdictKind,
 };
 use agent_marketplace::runtime::Runtime;
 use agent_marketplace::settlement::{
-    HoldStatus, ReleaseEvidence, SettlementHandle, SettlementService,
+    HoldKind, HoldRequest, HoldStatus, ReleaseEvidence, SettlementHandle, SettlementService,
 };
 use agent_marketplace::task::{TaskHandle, TaskService, TaskStatus};
 use agent_marketplace::types::{AssignmentId, TaskId, Timestamp};
@@ -57,6 +57,24 @@ impl ComponentStack {
 
 fn agent(id: &str) -> AgentId {
     AgentId::from(id)
+}
+
+fn hold_request(
+    publisher: &AgentId,
+    amount: u64,
+    task_id: &TaskId,
+    assignment_id: &AssignmentId,
+    agent_id: &AgentId,
+    kind: HoldKind,
+) -> HoldRequest {
+    HoldRequest::new(
+        publisher.clone(),
+        amount,
+        task_id.clone(),
+        assignment_id.clone(),
+        agent_id.clone(),
+        kind,
+    )
 }
 
 fn hash(value: u8) -> HashDigest {
@@ -107,6 +125,22 @@ async fn submit_text_artifact(
         )
         .await
         .unwrap();
+}
+
+async fn review_artifact_evidence(
+    live_sessions: &LiveSessionHandle,
+    assignment_id: &AssignmentId,
+) -> ReviewArtifactEvidence {
+    let assignment = live_sessions
+        .get_assignment(assignment_id.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    ReviewArtifactEvidence::new(
+        assignment.assignment_id,
+        assignment.status,
+        assignment.output_hash,
+    )
 }
 
 fn passed_verdict() -> Verdict {
@@ -201,11 +235,14 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
     let execute_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            execute_assignment.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &execute_assignment,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -241,11 +278,14 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
     let review_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            30,
-            task_id.clone(),
-            review_assignment.clone(),
-            reviewer.clone(),
+            hold_request(
+                &publisher,
+                30,
+                &task_id,
+                &review_assignment,
+                &reviewer,
+                HoldKind::Review,
+            ),
             Timestamp(10),
         )
         .await
@@ -274,7 +314,7 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
         .review
         .submit(
             review_id.clone(),
-            review_assignment.clone(),
+            review_artifact_evidence(&stack.live_sessions, &review_assignment).await,
             passed_verdict(),
             Timestamp(13),
         )
@@ -448,11 +488,14 @@ async fn timeout_before_submission_refunds_and_cancels_current_work() {
     let hold_id = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            assignment_id.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &assignment_id,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -560,11 +603,14 @@ async fn timeout_after_submission_preserves_output_and_escrow() {
     let hold_id = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            assignment_id.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &assignment_id,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -667,11 +713,14 @@ async fn reviewer_timeout_refunds_only_reviewer_hold() {
     let execute_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            execute_assignment.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &execute_assignment,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -707,11 +756,14 @@ async fn reviewer_timeout_refunds_only_reviewer_hold() {
     let review_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            30,
-            task_id.clone(),
-            review_assignment.clone(),
-            reviewer.clone(),
+            hold_request(
+                &publisher,
+                30,
+                &task_id,
+                &review_assignment,
+                &reviewer,
+                HoldKind::Review,
+            ),
             Timestamp(10),
         )
         .await
@@ -849,11 +901,14 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
     let execute_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            execute_assignment.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &execute_assignment,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -889,11 +944,14 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
     let first_review_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            30,
-            task_id.clone(),
-            first_review_assignment.clone(),
-            reviewer_1.clone(),
+            hold_request(
+                &publisher,
+                30,
+                &task_id,
+                &first_review_assignment,
+                &reviewer_1,
+                HoldKind::Review,
+            ),
             Timestamp(10),
         )
         .await
@@ -961,11 +1019,14 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
     let second_review_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            30,
-            task_id.clone(),
-            second_review_assignment.clone(),
-            reviewer_2.clone(),
+            hold_request(
+                &publisher,
+                30,
+                &task_id,
+                &second_review_assignment,
+                &reviewer_2,
+                HoldKind::Review,
+            ),
             Timestamp(15),
         )
         .await
@@ -994,7 +1055,7 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
         .review
         .submit(
             second_review_id.clone(),
-            second_review_assignment.clone(),
+            review_artifact_evidence(&stack.live_sessions, &second_review_assignment).await,
             passed_verdict(),
             Timestamp(18),
         )
@@ -1114,11 +1175,14 @@ async fn business_flow_failed_review_pays_reviewer_refunds_executor_and_cancels_
     let execute_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            100,
-            task_id.clone(),
-            execute_assignment.clone(),
-            executor.clone(),
+            hold_request(
+                &publisher,
+                100,
+                &task_id,
+                &execute_assignment,
+                &executor,
+                HoldKind::Execute,
+            ),
             Timestamp(6),
         )
         .await
@@ -1154,11 +1218,14 @@ async fn business_flow_failed_review_pays_reviewer_refunds_executor_and_cancels_
     let review_hold = stack
         .settlement
         .hold(
-            publisher.clone(),
-            30,
-            task_id.clone(),
-            review_assignment.clone(),
-            reviewer.clone(),
+            hold_request(
+                &publisher,
+                30,
+                &task_id,
+                &review_assignment,
+                &reviewer,
+                HoldKind::Review,
+            ),
             Timestamp(10),
         )
         .await
@@ -1187,7 +1254,7 @@ async fn business_flow_failed_review_pays_reviewer_refunds_executor_and_cancels_
         .review
         .submit(
             review_id.clone(),
-            review_assignment.clone(),
+            review_artifact_evidence(&stack.live_sessions, &review_assignment).await,
             failed_verdict(),
             Timestamp(13),
         )

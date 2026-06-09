@@ -139,17 +139,23 @@ mark_rejected
 cancel_assignment
   -> * -> Cancelled
 
+cancel_if_assigned
+  -> Assigned -> Cancelled
+  -> Submitted / Approved / Rejected / Cancelled 保持不变
+
 close_session
   -> Running -> Closed
 ```
 
-`submit_artifact()` 是 Agent-facing 完成入口，必须由承担该 Assignment 的 Agent 调用。它校验 ArtifactManifest 的 assignment、producer、manifest hash 和 media profile，然后只保存 manifest hash。
+`submit_artifact()` 是 Agent-facing 完成入口，必须由承担该 Assignment 的 Agent 调用。它校验 ArtifactManifest 的 task、assignment、producer、manifest hash 和 media profile，然后只保存 manifest hash。
 
 `submit_output()` 是底层 raw hash 入口，语义同样是写入 `artifact_manifest_hash`。它保留给测试、迁移或调用方已经完成 Artifact 协议校验的场景。
 
 `mark_approved()` 和 `mark_rejected()` 只接受 `Submitted` 状态。
 
-`cancel_assignment()` 是底层状态操作，只校验 Assignment 存在和时间戳不倒退。Runtime 掉线清理只会取消 `Assigned` 状态，避免覆盖已经提交的输出。
+`cancel_assignment()` 是底层状态操作，只校验 Assignment 存在和时间戳不倒退。业务调用通常应优先使用 `cancel_if_assigned()`。
+
+`cancel_if_assigned()` 在 LiveSession 内部重新读取 Assignment 状态，只在状态仍是 `Assigned` 时取消；如果已经 `Submitted` 或进入终态，返回 `Ok(false)`。Runtime 掉线清理使用该接口，避免快照竞态覆盖已经提交的输出。
 
 ## 核心原语
 
@@ -206,6 +212,12 @@ impl LiveSessionCore {
         at: Timestamp,
     ) -> Result<(), LiveSessionError>;
 
+    pub fn cancel_if_assigned(
+        &mut self,
+        assignment_id: &AssignmentId,
+        at: Timestamp,
+    ) -> Result<bool, LiveSessionError>;
+
     pub fn get_session(&self, session_id: &SessionId) -> Option<&LiveSession>;
     pub fn get_assignment(&self, assignment_id: &AssignmentId) -> Option<&Assignment>;
     pub fn assignments_by_task(&self, task_id: &TaskId) -> Vec<Assignment>;
@@ -226,7 +238,8 @@ impl LiveSessionCore {
 - Review Assignment 只能指向同任务内的 Execute Assignment
 - `submit_artifact.agent_id` / `submit_output.agent_id` 必须等于 Assignment 的 `agent_id`
 - `submit_artifact` / `submit_output` 只能发生在 `Assigned`
-- `submit_artifact` 必须提交符合 Artifact Protocol 的 manifest
+- `submit_artifact` 必须提交符合 Artifact Protocol 的 manifest，且 manifest 的 `task_id` / `assignment_id` / `producer_agent_id` 必须与 Assignment 匹配
+- `cancel_if_assigned` 必须在同一个 Core 写操作内重新校验状态，不能依赖外部快照
 - `mark_approved` / `mark_rejected` 只能发生在 `Submitted`
 - 所有写操作时间戳不能小于目标对象当前 `updated_at`
 - `assignments_by_*` 索引必须和 `assignments` 真相源保持一致
@@ -240,7 +253,7 @@ Task.create()
 Task.add_participant(task_id, agent_id)
 LiveSession.create_session(task_id)
 LiveSession.assign(task_id, session_id, agent_id, kind)
-Settlement.hold(..., task_id, assignment_id, agent_id, ...)
+Settlement.hold(HoldRequest { task_id, assignment_id, agent_id, kind, ... })
 Review.request(..., target_assignment_id, review_assignment_ids, ...)
 ```
 
@@ -250,7 +263,7 @@ Settlement 用 `assignment_id` 和 `agent_id` 绑定托管资金。
 
 Artifact Protocol 用 `assignment_id` 绑定产物 manifest，LiveSession 只保存 manifest hash，不保存文件内容或 URL。
 
-Runtime 在 Agent 掉线时查询 `assignments_by_agent(agent_id)`，但只取消 `Assigned` 状态的 Assignment。
+Runtime 在 Agent 掉线时查询 `assignments_by_agent(agent_id)`，但通过 `cancel_if_assigned()` 只取消仍处于 `Assigned` 状态的 Assignment。
 
 ## 错误处理
 
@@ -319,6 +332,7 @@ pub enum LiveSessionCommand {
     MarkApproved { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
     MarkRejected { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
     CancelAssignment { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<(), LiveSessionError>> },
+    CancelIfAssigned { assignment_id: AssignmentId, at: Timestamp, reply: oneshot::Sender<Result<bool, LiveSessionError>> },
     GetSession { session_id: SessionId, reply: oneshot::Sender<Option<LiveSession>> },
     GetAssignment { assignment_id: AssignmentId, reply: oneshot::Sender<Option<Assignment>> },
     AssignmentsByTask { task_id: TaskId, reply: oneshot::Sender<Vec<Assignment>> },
@@ -344,8 +358,9 @@ pub enum LiveSessionCommand {
 - assign Review 时拒绝非 Execute target
 - assign Review 时拒绝跨任务 target
 - submit output 校验承担 Agent
-- submit artifact 校验 assignment / producer / media profile 并保存 manifest hash
+- submit artifact 校验 task / assignment / producer / media profile 并保存 manifest hash
 - submit artifact / output 只能从 `Assigned` 进入 `Submitted`
+- cancel_if_assigned 不取消 `Submitted` Assignment
 - mark approved / rejected 只能处理 `Submitted`
 - close session 后拒绝新增 Assignment
 - cancel assignment 更新状态

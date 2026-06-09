@@ -54,6 +54,7 @@ mod tests {
         let manifest = seal_manifest(manifest(vec![text_file()], ArtifactKind::Single)).unwrap();
         let manifest_hash = validate_manifest_submission(
             &manifest,
+            &TaskId::from("task-1"),
             &AssignmentId::from("assignment-1"),
             &AgentId::from("agent-1"),
         )
@@ -233,6 +234,7 @@ mod tests {
 
         let error = validate_manifest_submission(
             &manifest,
+            &TaskId::from("task-1"),
             &AssignmentId::from("assignment-2"),
             &AgentId::from("agent-1"),
         )
@@ -243,6 +245,27 @@ mod tests {
             ArtifactError::AssignmentMismatch {
                 expected: AssignmentId::from("assignment-2"),
                 actual: AssignmentId::from("assignment-1")
+            }
+        );
+    }
+
+    #[test]
+    fn validates_task_identity() {
+        let manifest = seal_manifest(manifest(vec![text_file()], ArtifactKind::Single)).unwrap();
+
+        let error = validate_manifest_submission(
+            &manifest,
+            &TaskId::from("task-2"),
+            &AssignmentId::from("assignment-1"),
+            &AgentId::from("agent-1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ArtifactError::TaskMismatch {
+                expected: TaskId::from("task-2"),
+                actual: TaskId::from("task-1")
             }
         );
     }

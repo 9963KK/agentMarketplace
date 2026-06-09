@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::heartbeat::AgentId;
-use crate::types::{AssignmentId, TaskId, Timestamp};
+use crate::types::Timestamp;
 
 use super::types::{
-    Balance, Hold, HoldId, HoldStatus, LedgerEntry, LedgerEntryKind, ReleaseEvidence,
-    SettlementError,
+    Balance, Hold, HoldId, HoldKind, HoldRequest, HoldStatus, LedgerEntry, LedgerEntryKind,
+    ReleaseEvidence, SettlementError,
 };
 
 #[derive(Debug, Default)]
@@ -44,15 +44,15 @@ impl SettlementCore {
         Ok(())
     }
 
-    pub fn hold(
-        &mut self,
-        from_agent: AgentId,
-        amount: u64,
-        task_id: TaskId,
-        assignment_id: AssignmentId,
-        agent_id: AgentId,
-        at: Timestamp,
-    ) -> Result<HoldId, SettlementError> {
+    pub fn hold(&mut self, request: HoldRequest, at: Timestamp) -> Result<HoldId, SettlementError> {
+        let HoldRequest {
+            from_agent,
+            amount,
+            task_id,
+            assignment_id,
+            agent_id,
+            kind,
+        } = request;
         if amount == 0 {
             return Err(SettlementError::ZeroAmount);
         }
@@ -76,6 +76,7 @@ impl SettlementCore {
                 task_id: task_id.clone(),
                 assignment_id: assignment_id.clone(),
                 agent_id: agent_id.clone(),
+                kind,
                 status: HoldStatus::Active,
             },
         );
@@ -229,6 +230,7 @@ fn validate_release_evidence(
             assignment_id,
             review_ids,
         } if hold.task_id == *task_id && hold.assignment_id == *assignment_id => {
+            validate_hold_kind(hold, HoldKind::Execute)?;
             if review_ids.is_empty() {
                 return Err(SettlementError::EmptyReviewEvidence);
             }
@@ -237,7 +239,9 @@ fn validate_release_evidence(
             task_id,
             assignment_id,
             review_id: _,
-        } if hold.task_id == *task_id && hold.assignment_id == *assignment_id => {}
+        } if hold.task_id == *task_id && hold.assignment_id == *assignment_id => {
+            validate_hold_kind(hold, HoldKind::Review)?;
+        }
         _ => {
             return Err(SettlementError::ReleaseEvidenceMismatch {
                 hold_id: hold.hold_id.clone(),
@@ -248,9 +252,22 @@ fn validate_release_evidence(
     Ok(())
 }
 
+fn validate_hold_kind(hold: &Hold, expected: HoldKind) -> Result<(), SettlementError> {
+    if hold.kind != expected {
+        return Err(SettlementError::HoldKindMismatch {
+            hold_id: hold.hold_id.clone(),
+            expected,
+            actual: hold.kind,
+        });
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::review::ReviewId;
+    use crate::types::{AssignmentId, TaskId};
 
     use super::*;
 
@@ -268,6 +285,22 @@ mod tests {
 
     fn review(id: &str) -> ReviewId {
         ReviewId::from(id)
+    }
+
+    fn hold_request(
+        amount: u64,
+        assignment_id: &str,
+        agent_id: &str,
+        kind: HoldKind,
+    ) -> HoldRequest {
+        HoldRequest::new(
+            agent("publisher"),
+            amount,
+            task("task-1"),
+            assignment(assignment_id),
+            agent(agent_id),
+            kind,
+        )
     }
 
     fn accepted(assignment_id: &str) -> ReleaseEvidence {
@@ -320,11 +353,7 @@ mod tests {
 
         let hold_id = core
             .hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
                 Timestamp(1),
             )
             .unwrap();
@@ -344,12 +373,8 @@ mod tests {
 
         assert_eq!(
             core.hold(
-                agent("publisher"),
-                0,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
-                Timestamp(1),
+                hold_request(0, "execute-1", "executor", HoldKind::Execute),
+                Timestamp(1)
             )
             .unwrap_err(),
             SettlementError::ZeroAmount
@@ -363,12 +388,8 @@ mod tests {
 
         assert_eq!(
             core.hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
-                Timestamp(1),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
+                Timestamp(1)
             )
             .unwrap_err(),
             SettlementError::InsufficientBalance {
@@ -387,11 +408,7 @@ mod tests {
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let hold_id = core
             .hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
                 Timestamp(1),
             )
             .unwrap();
@@ -414,11 +431,7 @@ mod tests {
         core.deposit(agent("publisher"), 25, Timestamp(0)).unwrap();
         let hold_id = core
             .hold(
-                agent("publisher"),
-                25,
-                task("task-1"),
-                assignment("review-assignment-1"),
-                agent("reviewer-1"),
+                hold_request(25, "review-assignment-1", "reviewer-1", HoldKind::Review),
                 Timestamp(1),
             )
             .unwrap();
@@ -435,16 +448,49 @@ mod tests {
     }
 
     #[test]
+    fn release_rejects_evidence_for_wrong_hold_kind() {
+        let mut core = SettlementCore::new();
+        core.deposit(agent("publisher"), 130, Timestamp(0)).unwrap();
+        let execute_hold = core
+            .hold(
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
+                Timestamp(1),
+            )
+            .unwrap();
+        let review_hold = core
+            .hold(
+                hold_request(30, "review-1", "reviewer", HoldKind::Review),
+                Timestamp(1),
+            )
+            .unwrap();
+
+        assert_eq!(
+            core.release(&execute_hold, review_submitted("execute-1"), Timestamp(2))
+                .unwrap_err(),
+            SettlementError::HoldKindMismatch {
+                hold_id: execute_hold,
+                expected: HoldKind::Review,
+                actual: HoldKind::Execute
+            }
+        );
+        assert_eq!(
+            core.release(&review_hold, accepted("review-1"), Timestamp(2))
+                .unwrap_err(),
+            SettlementError::HoldKindMismatch {
+                hold_id: review_hold,
+                expected: HoldKind::Execute,
+                actual: HoldKind::Review
+            }
+        );
+    }
+
+    #[test]
     fn release_rejects_wrong_assignment_or_empty_review_evidence() {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let hold_id = core
             .hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
                 Timestamp(1),
             )
             .unwrap();
@@ -478,11 +524,7 @@ mod tests {
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let hold_id = core
             .hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
                 Timestamp(1),
             )
             .unwrap();
@@ -502,11 +544,7 @@ mod tests {
         core.deposit(agent("publisher"), 100, Timestamp(0)).unwrap();
         let released = core
             .hold(
-                agent("publisher"),
-                100,
-                task("task-1"),
-                assignment("execute-1"),
-                agent("executor"),
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
                 Timestamp(1),
             )
             .unwrap();
@@ -527,20 +565,12 @@ mod tests {
         let mut core = SettlementCore::new();
         core.deposit(agent("publisher"), 125, Timestamp(0)).unwrap();
         core.hold(
-            agent("publisher"),
-            100,
-            task("task-1"),
-            assignment("execute-1"),
-            agent("executor"),
+            hold_request(100, "execute-1", "executor", HoldKind::Execute),
             Timestamp(1),
         )
         .unwrap();
         core.hold(
-            agent("publisher"),
-            25,
-            task("task-1"),
-            assignment("review-1"),
-            agent("reviewer-1"),
+            hold_request(25, "review-1", "reviewer-1", HoldKind::Review),
             Timestamp(1),
         )
         .unwrap();

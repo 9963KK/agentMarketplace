@@ -6,7 +6,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::types::{AssignmentId, TaskId, Timestamp};
 
 use super::ReviewCore;
-use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
+use super::types::{
+    ReviewArtifactEvidence, ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict,
+    VerdictRecord,
+};
 
 const DEFAULT_COMMAND_BUFFER: usize = 128;
 
@@ -22,7 +25,7 @@ pub enum ReviewCommand {
     },
     Submit {
         review_id: ReviewId,
-        review_assignment_id: AssignmentId,
+        artifact: ReviewArtifactEvidence,
         verdict: Verdict,
         submitted_at: Timestamp,
         reply: oneshot::Sender<Result<(), ReviewError>>,
@@ -77,14 +80,14 @@ impl ReviewHandle {
     pub async fn submit(
         &self,
         review_id: impl Into<ReviewId>,
-        review_assignment_id: impl Into<AssignmentId>,
+        artifact: ReviewArtifactEvidence,
         verdict: Verdict,
         submitted_at: Timestamp,
     ) -> Result<(), ReviewServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(ReviewCommand::Submit {
             review_id: review_id.into(),
-            review_assignment_id: review_assignment_id.into(),
+            artifact,
             verdict,
             submitted_at,
             reply,
@@ -240,17 +243,15 @@ impl ReviewService {
             }
             ReviewCommand::Submit {
                 review_id,
-                review_assignment_id,
+                artifact,
                 verdict,
                 submitted_at,
                 reply,
             } => {
-                let _ = reply.send(self.core.submit(
-                    &review_id,
-                    review_assignment_id,
-                    verdict,
-                    submitted_at,
-                ));
+                let _ = reply.send(
+                    self.core
+                        .submit(&review_id, artifact, verdict, submitted_at),
+                );
                 None
             }
             ReviewCommand::Collect { review_id, reply } => {
@@ -275,7 +276,9 @@ impl ReviewService {
 
 #[cfg(test)]
 mod tests {
+    use crate::livesession::AssignmentStatus;
     use crate::review::{MAX_CRITERIA_BYTES, VerdictKind};
+    use crate::types::OutputHash;
 
     use super::*;
 
@@ -289,6 +292,14 @@ mod tests {
             score_bps,
             feedback: "reviewed".to_string(),
         }
+    }
+
+    fn submitted_artifact(id: &str) -> ReviewArtifactEvidence {
+        ReviewArtifactEvidence::new(
+            assignment(id),
+            AssignmentStatus::Submitted,
+            Some(OutputHash::from(format!("artifact-hash-{id}"))),
+        )
     }
 
     #[tokio::test]
@@ -308,7 +319,7 @@ mod tests {
         review
             .submit(
                 review_id.clone(),
-                "review-1",
+                submitted_artifact("review-1"),
                 verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )

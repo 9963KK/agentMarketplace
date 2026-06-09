@@ -98,6 +98,7 @@ task_1
 | `mark_approved(assignment_id, at)` | 标记 Assignment 审查通过 |
 | `mark_rejected(assignment_id, at)` | 标记 Assignment 审查失败 |
 | `cancel_assignment(assignment_id, at)` | 取消 Assignment |
+| `cancel_if_assigned(assignment_id, at)` | 仅当 Assignment 仍是 `Assigned` 时取消 |
 | `assignments_by_task(task_id)` | 查询任务下全部 Assignment |
 | `assignments_by_session(session_id)` | 查询当前批次 Assignment |
 | `assignments_by_agent(agent_id)` | 查询某 Agent 的 Assignment |
@@ -117,6 +118,7 @@ submit_artifact(assignment_id, agent_id, manifest)
 - `assignment_id` 存在
 - `agent_id == assignment.agent_id`
 - Assignment 仍处于 `Assigned`
+- `manifest.task_id == assignment.task_id`
 - `manifest.assignment_id == assignment_id`
 - `manifest.producer_agent_id == agent_id`
 - `manifest_hash` 与规范化 manifest 匹配
@@ -166,6 +168,7 @@ struct Hold {
     task_id: TaskId,
     assignment_id: AssignmentId,
     agent_id: AgentId,
+    kind: HoldKind,
     status: HoldStatus,
 }
 ```

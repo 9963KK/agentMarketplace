@@ -95,19 +95,23 @@ impl Runtime {
                     }
 
                     let assignment_id = assignment.assignment_id;
-                    if let Err(error) = self
+                    match self
                         .live_sessions
-                        .cancel_assignment(assignment_id.clone(), at)
+                        .cancel_if_assigned(assignment_id.clone(), at)
                         .await
                     {
-                        report.record_error(
+                        Ok(true) => {
+                            assigned_assignment_ids.insert(assignment_id.clone());
+                            report.record_action(RuntimeAction::AssignmentCancelled {
+                                assignment_id,
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(error) => report.record_error(
                             RuntimeActionKind::CancelAssignment,
                             assignment_id.to_string(),
                             error,
-                        );
-                    } else {
-                        assigned_assignment_ids.insert(assignment_id.clone());
-                        report.record_action(RuntimeAction::AssignmentCancelled { assignment_id });
+                        ),
                     }
                 }
                 assigned_assignment_ids

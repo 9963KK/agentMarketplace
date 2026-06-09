@@ -4,10 +4,12 @@ use std::fmt;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::heartbeat::AgentId;
-use crate::types::{AssignmentId, TaskId, Timestamp};
+use crate::types::Timestamp;
 
 use super::SettlementCore;
-use super::types::{Balance, Hold, HoldId, LedgerEntry, ReleaseEvidence, SettlementError};
+use super::types::{
+    Balance, Hold, HoldId, HoldRequest, LedgerEntry, ReleaseEvidence, SettlementError,
+};
 
 const DEFAULT_COMMAND_BUFFER: usize = 128;
 
@@ -20,11 +22,7 @@ pub enum SettlementCommand {
         reply: oneshot::Sender<Result<(), SettlementError>>,
     },
     Hold {
-        from_agent: AgentId,
-        amount: u64,
-        task_id: TaskId,
-        assignment_id: AssignmentId,
-        agent_id: AgentId,
+        request: HoldRequest,
         at: Timestamp,
         reply: oneshot::Sender<Result<HoldId, SettlementError>>,
     },
@@ -87,24 +85,12 @@ impl SettlementHandle {
 
     pub async fn hold(
         &self,
-        from_agent: impl Into<AgentId>,
-        amount: u64,
-        task_id: impl Into<TaskId>,
-        assignment_id: impl Into<AssignmentId>,
-        agent_id: impl Into<AgentId>,
+        request: HoldRequest,
         at: Timestamp,
     ) -> Result<HoldId, SettlementServiceError> {
         let (reply, response) = oneshot::channel();
-        self.send(SettlementCommand::Hold {
-            from_agent: from_agent.into(),
-            amount,
-            task_id: task_id.into(),
-            assignment_id: assignment_id.into(),
-            agent_id: agent_id.into(),
-            at,
-            reply,
-        })
-        .await?;
+        self.send(SettlementCommand::Hold { request, at, reply })
+            .await?;
         response
             .await
             .map_err(|_| SettlementServiceError::ResponseDropped)?
@@ -291,23 +277,8 @@ impl SettlementService {
                 let _ = reply.send(self.core.deposit(agent_id, amount, at));
                 None
             }
-            SettlementCommand::Hold {
-                from_agent,
-                amount,
-                task_id,
-                assignment_id,
-                agent_id,
-                at,
-                reply,
-            } => {
-                let _ = reply.send(self.core.hold(
-                    from_agent,
-                    amount,
-                    task_id,
-                    assignment_id,
-                    agent_id,
-                    at,
-                ));
+            SettlementCommand::Hold { request, at, reply } => {
+                let _ = reply.send(self.core.hold(request, at));
                 None
             }
             SettlementCommand::Release {
@@ -347,6 +318,8 @@ impl SettlementService {
 #[cfg(test)]
 mod tests {
     use crate::review::ReviewId;
+    use crate::settlement::HoldKind;
+    use crate::types::{AssignmentId, TaskId};
 
     use super::*;
 
@@ -358,6 +331,17 @@ mod tests {
         }
     }
 
+    fn hold_request(amount: u64) -> HoldRequest {
+        HoldRequest::new(
+            AgentId::from("publisher"),
+            amount,
+            TaskId::from("task-1"),
+            AssignmentId::from("execute-1"),
+            AgentId::from("executor"),
+            HoldKind::Execute,
+        )
+    }
+
     #[tokio::test]
     async fn service_holds_releases_and_reports_balance() {
         let settlement = SettlementService::spawn();
@@ -367,14 +351,7 @@ mod tests {
             .await
             .unwrap();
         let hold_id = settlement
-            .hold(
-                "publisher",
-                100,
-                "task-1",
-                "execute-1",
-                "executor",
-                Timestamp(1),
-            )
+            .hold(hold_request(100), Timestamp(1))
             .await
             .unwrap();
         settlement
@@ -403,14 +380,7 @@ mod tests {
             .unwrap();
 
         let error = settlement
-            .hold(
-                "publisher",
-                100,
-                "task-1",
-                "execute-1",
-                "executor",
-                Timestamp(1),
-            )
+            .hold(hold_request(100), Timestamp(1))
             .await
             .unwrap_err();
 
@@ -432,14 +402,7 @@ mod tests {
         let settlement = SettlementService::spawn();
 
         let error = settlement
-            .hold(
-                "publisher",
-                0,
-                "task-1",
-                "execute-1",
-                "executor",
-                Timestamp(1),
-            )
+            .hold(hold_request(0), Timestamp(1))
             .await
             .unwrap_err();
 
@@ -459,14 +422,7 @@ mod tests {
 
         assert_eq!(
             settlement
-                .hold(
-                    "publisher",
-                    100,
-                    "task-1",
-                    "execute-1",
-                    "executor",
-                    Timestamp(1),
-                )
+                .hold(hold_request(100), Timestamp(1))
                 .await
                 .unwrap_err(),
             SettlementServiceError::Stopped

@@ -2,7 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::{AssignmentId, TaskId, Timestamp};
 
-use super::types::{ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict, VerdictRecord};
+use crate::livesession::AssignmentStatus;
+
+use super::types::{
+    ReviewArtifactEvidence, ReviewCriteria, ReviewError, ReviewId, ReviewSession, Verdict,
+    VerdictRecord,
+};
 
 pub const MAX_CRITERIA_BYTES: usize = 16 * 1024;
 pub const MAX_FEEDBACK_BYTES: usize = 32 * 1024;
@@ -60,11 +65,13 @@ impl ReviewCore {
     pub fn submit(
         &mut self,
         review_id: &ReviewId,
-        review_assignment_id: AssignmentId,
+        artifact: ReviewArtifactEvidence,
         verdict: Verdict,
         submitted_at: Timestamp,
     ) -> Result<(), ReviewError> {
         validate_verdict(&verdict)?;
+        validate_review_artifact(&artifact)?;
+        let review_assignment_id = artifact.review_assignment_id.clone();
 
         let session = self
             .sessions
@@ -93,6 +100,7 @@ impl ReviewCore {
         session.verdicts.push(VerdictRecord {
             review_id: review_id.clone(),
             review_assignment_id,
+            artifact_hash: artifact.output_hash.expect("artifact was validated"),
             target_assignment_id: session.target_assignment_id.clone(),
             verdict,
             submitted_at,
@@ -136,6 +144,22 @@ impl ReviewCore {
         self.next_review += 1;
         ReviewId::new(format!("review-{}", self.next_review))
     }
+}
+
+fn validate_review_artifact(artifact: &ReviewArtifactEvidence) -> Result<(), ReviewError> {
+    if artifact.status != AssignmentStatus::Submitted {
+        return Err(ReviewError::ReviewArtifactNotSubmitted {
+            review_assignment_id: artifact.review_assignment_id.clone(),
+            status: artifact.status,
+        });
+    }
+    if artifact.output_hash.is_none() {
+        return Err(ReviewError::MissingReviewArtifactHash(
+            artifact.review_assignment_id.clone(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_review_assignments(review_assignment_ids: &[AssignmentId]) -> Result<(), ReviewError> {
@@ -186,6 +210,7 @@ fn validate_verdict(verdict: &Verdict) -> Result<(), ReviewError> {
 #[cfg(test)]
 mod tests {
     use crate::review::{CriteriaFormat, VerdictKind};
+    use crate::types::OutputHash;
 
     use super::*;
 
@@ -207,6 +232,14 @@ mod tests {
             score_bps,
             feedback: "looks good".to_string(),
         }
+    }
+
+    fn submitted_artifact(id: &str) -> ReviewArtifactEvidence {
+        ReviewArtifactEvidence::new(
+            assignment(id),
+            AssignmentStatus::Submitted,
+            Some(OutputHash::from(format!("artifact-hash-{id}"))),
+        )
     }
 
     fn request_review(core: &mut ReviewCore) -> ReviewId {
@@ -313,7 +346,7 @@ mod tests {
 
         core.submit(
             &review_id,
-            assignment("review-1"),
+            submitted_artifact("review-1"),
             verdict(VerdictKind::Passed, 9_000),
             Timestamp(2),
         )
@@ -334,7 +367,7 @@ mod tests {
         assert_eq!(
             core.submit(
                 &ReviewId::from("missing"),
-                assignment("review-1"),
+                submitted_artifact("review-1"),
                 verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )
@@ -345,7 +378,7 @@ mod tests {
         assert_eq!(
             core.submit(
                 &review_id,
-                assignment("review-3"),
+                submitted_artifact("review-3"),
                 verdict(VerdictKind::Passed, 9_000),
                 Timestamp(2),
             )
@@ -364,7 +397,7 @@ mod tests {
 
         core.submit(
             &review_id,
-            assignment("review-1"),
+            submitted_artifact("review-1"),
             verdict(VerdictKind::Passed, 9_000),
             Timestamp(2),
         )
@@ -373,7 +406,7 @@ mod tests {
         assert_eq!(
             core.submit(
                 &review_id,
-                assignment("review-1"),
+                submitted_artifact("review-1"),
                 verdict(VerdictKind::Failed, 1_000),
                 Timestamp(3),
             )
@@ -393,7 +426,7 @@ mod tests {
         assert_eq!(
             core.submit(
                 &review_id,
-                assignment("review-1"),
+                submitted_artifact("review-1"),
                 verdict(VerdictKind::Passed, 10_001),
                 Timestamp(2),
             )
@@ -407,12 +440,55 @@ mod tests {
             feedback: "x".repeat(MAX_FEEDBACK_BYTES + 1),
         };
         assert_eq!(
-            core.submit(&review_id, assignment("review-1"), large, Timestamp(2))
-                .unwrap_err(),
+            core.submit(
+                &review_id,
+                submitted_artifact("review-1"),
+                large,
+                Timestamp(2)
+            )
+            .unwrap_err(),
             ReviewError::FeedbackTooLarge {
                 max_bytes: MAX_FEEDBACK_BYTES,
                 actual_bytes: MAX_FEEDBACK_BYTES + 1
             }
+        );
+    }
+
+    #[test]
+    fn submit_requires_submitted_review_artifact() {
+        let mut core = ReviewCore::new();
+        let review_id = request_review(&mut core);
+
+        assert_eq!(
+            core.submit(
+                &review_id,
+                ReviewArtifactEvidence::new(
+                    assignment("review-1"),
+                    AssignmentStatus::Assigned,
+                    None
+                ),
+                verdict(VerdictKind::Passed, 9_000),
+                Timestamp(2),
+            )
+            .unwrap_err(),
+            ReviewError::ReviewArtifactNotSubmitted {
+                review_assignment_id: assignment("review-1"),
+                status: AssignmentStatus::Assigned
+            }
+        );
+        assert_eq!(
+            core.submit(
+                &review_id,
+                ReviewArtifactEvidence::new(
+                    assignment("review-1"),
+                    AssignmentStatus::Submitted,
+                    None
+                ),
+                verdict(VerdictKind::Passed, 9_000),
+                Timestamp(2),
+            )
+            .unwrap_err(),
+            ReviewError::MissingReviewArtifactHash(assignment("review-1"))
         );
     }
 }

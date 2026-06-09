@@ -55,7 +55,44 @@ pub struct Hold {
     pub task_id: TaskId,
     pub assignment_id: AssignmentId,
     pub agent_id: AgentId,
+    pub kind: HoldKind,
     pub status: HoldStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HoldRequest {
+    pub from_agent: AgentId,
+    pub amount: u64,
+    pub task_id: TaskId,
+    pub assignment_id: AssignmentId,
+    pub agent_id: AgentId,
+    pub kind: HoldKind,
+}
+
+impl HoldRequest {
+    pub fn new(
+        from_agent: impl Into<AgentId>,
+        amount: u64,
+        task_id: impl Into<TaskId>,
+        assignment_id: impl Into<AssignmentId>,
+        agent_id: impl Into<AgentId>,
+        kind: HoldKind,
+    ) -> Self {
+        Self {
+            from_agent: from_agent.into(),
+            amount,
+            task_id: task_id.into(),
+            assignment_id: assignment_id.into(),
+            agent_id: agent_id.into(),
+            kind,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HoldKind {
+    Execute,
+    Review,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +168,11 @@ pub enum SettlementError {
     ReleaseEvidenceMismatch {
         hold_id: HoldId,
     },
+    HoldKindMismatch {
+        hold_id: HoldId,
+        expected: HoldKind,
+        actual: HoldKind,
+    },
     Overflow,
 }
 
@@ -157,6 +199,14 @@ impl fmt::Display for SettlementError {
             SettlementError::ReleaseEvidenceMismatch { hold_id } => {
                 write!(f, "release evidence does not match hold: {hold_id}")
             }
+            SettlementError::HoldKindMismatch {
+                hold_id,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "release evidence kind mismatch for hold {hold_id}: expected={expected:?}, actual={actual:?}"
+            ),
             SettlementError::Overflow => f.write_str("balance overflow"),
         }
     }

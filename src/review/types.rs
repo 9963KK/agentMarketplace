@@ -1,7 +1,8 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::types::{AssignmentId, TaskId, Timestamp};
+use crate::livesession::AssignmentStatus;
+use crate::types::{AssignmentId, OutputHash, TaskId, Timestamp};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ReviewId(String);
@@ -86,9 +87,31 @@ pub struct ReviewSession {
 pub struct VerdictRecord {
     pub review_id: ReviewId,
     pub review_assignment_id: AssignmentId,
+    pub artifact_hash: OutputHash,
     pub target_assignment_id: AssignmentId,
     pub verdict: Verdict,
     pub submitted_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewArtifactEvidence {
+    pub review_assignment_id: AssignmentId,
+    pub status: AssignmentStatus,
+    pub output_hash: Option<OutputHash>,
+}
+
+impl ReviewArtifactEvidence {
+    pub fn new(
+        review_assignment_id: impl Into<AssignmentId>,
+        status: AssignmentStatus,
+        output_hash: Option<OutputHash>,
+    ) -> Self {
+        Self {
+            review_assignment_id: review_assignment_id.into(),
+            status,
+            output_hash,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,6 +149,11 @@ pub enum ReviewError {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
     },
+    ReviewArtifactNotSubmitted {
+        review_assignment_id: AssignmentId,
+        status: AssignmentStatus,
+    },
+    MissingReviewArtifactHash(AssignmentId),
     DuplicateVerdict {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
@@ -165,6 +193,19 @@ impl fmt::Display for ReviewError {
                 f,
                 "review assignment {review_assignment_id} is not allowed for review {review_id}"
             ),
+            ReviewError::ReviewArtifactNotSubmitted {
+                review_assignment_id,
+                status,
+            } => write!(
+                f,
+                "review assignment artifact is not submitted: {review_assignment_id}, status={status:?}"
+            ),
+            ReviewError::MissingReviewArtifactHash(assignment_id) => {
+                write!(
+                    f,
+                    "review assignment is missing artifact hash: {assignment_id}"
+                )
+            }
             ReviewError::DuplicateVerdict {
                 review_id,
                 review_assignment_id,

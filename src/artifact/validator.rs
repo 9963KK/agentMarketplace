@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::heartbeat::AgentId;
-use crate::types::AssignmentId;
+use crate::types::{AssignmentId, TaskId};
 
 use super::hash::sha256_digest;
 use super::profile::{MediaProfileSpec, find_media_profile};
@@ -36,9 +36,16 @@ pub fn validate_manifest(manifest: &ArtifactManifest) -> Result<HashDigest, Arti
 
 pub fn validate_manifest_submission(
     manifest: &ArtifactManifest,
+    task_id: &TaskId,
     assignment_id: &AssignmentId,
     producer_agent_id: &AgentId,
 ) -> Result<HashDigest, ArtifactError> {
+    if manifest.task_id != *task_id {
+        return Err(ArtifactError::TaskMismatch {
+            expected: task_id.clone(),
+            actual: manifest.task_id.clone(),
+        });
+    }
     if manifest.assignment_id != *assignment_id {
         return Err(ArtifactError::AssignmentMismatch {
             expected: assignment_id.clone(),

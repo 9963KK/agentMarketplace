@@ -61,6 +61,11 @@ pub enum LiveSessionCommand {
         at: Timestamp,
         reply: oneshot::Sender<Result<(), LiveSessionError>>,
     },
+    CancelIfAssigned {
+        assignment_id: AssignmentId,
+        at: Timestamp,
+        reply: oneshot::Sender<Result<bool, LiveSessionError>>,
+    },
     GetSession {
         session_id: SessionId,
         reply: oneshot::Sender<Option<LiveSession>>,
@@ -238,6 +243,24 @@ impl LiveSessionHandle {
     ) -> Result<(), LiveSessionServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(LiveSessionCommand::CancelAssignment {
+            assignment_id: assignment_id.into(),
+            at,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| LiveSessionServiceError::ResponseDropped)?
+            .map_err(LiveSessionServiceError::LiveSession)
+    }
+
+    pub async fn cancel_if_assigned(
+        &self,
+        assignment_id: impl Into<AssignmentId>,
+        at: Timestamp,
+    ) -> Result<bool, LiveSessionServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(LiveSessionCommand::CancelIfAssigned {
             assignment_id: assignment_id.into(),
             at,
             reply,
@@ -477,6 +500,14 @@ impl LiveSessionService {
                 reply,
             } => {
                 let _ = reply.send(self.core.cancel_assignment(&assignment_id, at));
+                None
+            }
+            LiveSessionCommand::CancelIfAssigned {
+                assignment_id,
+                at,
+                reply,
+            } => {
+                let _ = reply.send(self.core.cancel_if_assigned(&assignment_id, at));
                 None
             }
             LiveSessionCommand::GetSession { session_id, reply } => {
