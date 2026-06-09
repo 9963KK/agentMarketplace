@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::artifact::MediaProfileId;
 use crate::heartbeat::AgentId;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct CapabilityName(String);
 
 impl CapabilityName {
@@ -45,7 +48,7 @@ impl fmt::Display for CapabilityName {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentIdentity {
     pub agent_id: AgentId,
     pub name: Option<String>,
@@ -64,7 +67,7 @@ impl AgentIdentity {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CapabilityContract {
     pub input_profiles: Vec<MediaProfileId>,
     pub output_profiles: Vec<MediaProfileId>,
@@ -79,7 +82,7 @@ impl CapabilityContract {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Capability {
     pub name: CapabilityName,
     pub max_concurrency: u32,
@@ -101,25 +104,25 @@ impl Capability {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LoadInfo {
     pub current: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AgentLifecycle {
     Registered,
     Deregistered,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentInfo {
     pub identity: AgentIdentity,
     pub capabilities: BTreeMap<CapabilityName, Capability>,
     pub lifecycle: AgentLifecycle,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DiscoveryQuery {
     pub capability: CapabilityName,
     pub include_busy: bool,
@@ -146,7 +149,7 @@ impl DiscoveryQuery {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentCandidate {
     pub agent_id: AgentId,
     pub name: Option<String>,
@@ -156,14 +159,14 @@ pub struct AgentCandidate {
     pub max_concurrency: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum RegisterOutcome {
     Registered,
     Updated,
     ReRegistered,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CapabilityUpdateOutcome {
     Declared,
     Replaced,

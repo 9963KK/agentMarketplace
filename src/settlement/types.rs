@@ -1,11 +1,14 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::heartbeat::AgentId;
 use crate::review::ReviewId;
 use crate::types::{AssignmentId, TaskId, Timestamp};
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct HoldId(String);
 
 impl HoldId {
@@ -47,7 +50,7 @@ impl fmt::Display for HoldId {
 
 pub type Balance = u64;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Hold {
     pub hold_id: HoldId,
     pub from_agent: AgentId,
@@ -59,7 +62,7 @@ pub struct Hold {
     pub status: HoldStatus,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HoldRequest {
     pub from_agent: AgentId,
     pub amount: u64,
@@ -89,20 +92,20 @@ impl HoldRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HoldKind {
     Execute,
     Review,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HoldStatus {
     Active,
     Released,
     Refunded,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ReleaseEvidence {
     AssignmentOutputAccepted {
         task_id: TaskId,
@@ -116,7 +119,7 @@ pub enum ReleaseEvidence {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LedgerEntry {
     pub hold_id: Option<HoldId>,
     pub task_id: Option<TaskId>,
@@ -126,7 +129,7 @@ pub struct LedgerEntry {
     pub at: Timestamp,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LedgerEntryKind {
     Deposited {
         agent_id: AgentId,
@@ -143,7 +146,7 @@ pub enum LedgerEntryKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SettlementOutcome {
     Held(HoldId),
     Released,

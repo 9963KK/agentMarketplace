@@ -1,9 +1,12 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 macro_rules! id_type {
     ($name:ident, $display:literal, $error:ident) => {
-        #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+        #[serde(transparent)]
         pub struct $name(String);
 
         impl $name {
@@ -50,7 +53,7 @@ id_type!(SessionId, "session id", EmptySessionId);
 id_type!(AssignmentId, "assignment id", EmptyAssignmentId);
 id_type!(OutputHash, "output hash", EmptyOutputHash);
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Timestamp(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::heartbeat::AgentId;
 use crate::types::{AssignmentId, TaskId, Timestamp};
 
 pub const ARTIFACT_PROTOCOL_V1: &str = "agent-artifact/v1";
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct ArtifactId(String);
 
 impl ArtifactId {
@@ -47,7 +50,8 @@ impl fmt::Display for ArtifactId {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct MediaProfileId(String);
 
 impl MediaProfileId {
@@ -87,7 +91,8 @@ impl fmt::Display for MediaProfileId {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct HashDigest(String);
 
 impl HashDigest {
@@ -118,13 +123,13 @@ impl fmt::Display for HashDigest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ArtifactKind {
     Single,
     Bundle,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SchemaRef {
     pub name: String,
     pub version: String,
@@ -141,14 +146,14 @@ impl SchemaRef {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ArtifactProperty {
     Bool(bool),
     Integer(u64),
     Text(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ArtifactFile {
     pub path: Option<String>,
     pub uri: String,
@@ -196,7 +201,7 @@ impl ArtifactFile {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ArtifactManifest {
     pub protocol: String,
     pub artifact_id: ArtifactId,

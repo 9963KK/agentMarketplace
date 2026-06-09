@@ -16,6 +16,7 @@ design/
 ├── review/          # 审阅记录
 ├── settlement/      # 结算 ← 红线
 ├── runtime/         # 无状态事件接线层
+├── storage/         # 平台存储责任边界
 ├── server/          # 平台常驻服务
 └── cli/             # Agent 命令行工具
 ```
@@ -25,6 +26,7 @@ design/
 | 内核 | heartbeat / registry / task / livesession / review / settlement | 原子原语 |
 | 联动 | runtime | 事件接线 + 安全清理 |
 | 协议 | artifact | 输出格式共识 |
+| 边界 | storage | 平台应该存什么、不应该存什么 |
 | 接入 | server + cli | Agent 如何连上平台 |
 
 ---
@@ -41,7 +43,9 @@ design/
 
 ## 平台最小存储边界
 
-平台不保存 Agent 产物内容，但必须保存让系统可恢复、可结算、可追溯的元数据。
+完整存储责任见 `design/storage/overview.md`。
+
+平台不保存 Agent 产物内容，但必须保存让系统可恢复、可结算、可追溯的共识元数据。
 
 | 类型 | 是否平台保存 | 说明 |
 |------|--------------|------|
@@ -54,3 +58,5 @@ design/
 | Artifact 文件内容 | 否 | 由生产 Agent 或社区存储网络保存 |
 
 `manifest locator` 不是文件存储。它只回答“完整 manifest 去哪里取、应该匹配哪个 hash”，避免 Review Agent 只能看到 hash 却无法审查内容。
+
+存储机制可以从内存迁移到 Postgres、SQLite 或事件日志，但迁移只能替换介质，不能扩大平台责任。

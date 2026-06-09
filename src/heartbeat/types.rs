@@ -2,7 +2,10 @@ use std::error::Error;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct AgentId(String);
 
 impl AgentId {
@@ -140,13 +143,13 @@ impl PingInfo {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HeartbeatEvent {
     AgentTimedOut { agent_id: AgentId },
     AgentRecovered { agent_id: AgentId },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum PingOutcome {
     FirstSeen,
     Updated,

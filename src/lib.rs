@@ -4,6 +4,8 @@ pub mod livesession;
 pub mod registry;
 pub mod review;
 pub mod runtime;
+pub mod server;
 pub mod settlement;
+pub mod storage;
 pub mod task;
 pub mod types;

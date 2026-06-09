@@ -39,9 +39,67 @@ Agent CLI                     Agent SDK                  平台运维
 
 ---
 
+## PlatformApp
+
+第一版代码先实现 `PlatformApp`，它是 HTTP / gRPC 传输层之前的安全接入门面。
+
+`PlatformApp` 持有内部组件 handle：
+
+```text
+registry
+heartbeat
+task
+livesession
+review
+settlement
+settlement_gateway
+runtime
+storage
+```
+
+职责：
+
+- 启动和关闭所有组件 service。
+- 注册 Agent 后签发 token，并把 token hash 存到 Storage。
+- 后续请求通过 token 推导 `agent_id`，不信任请求体里的 `agent_id`。
+- 对写操作执行 `Idempotency-Key` 防重放。
+- `submit_artifact` 时先写 LiveSession，再保存 `ArtifactLocator`。
+- Review verdict 由 server 根据 Review Assignment 当前状态构造 evidence。
+- 执行款和审查款放款只暴露 SettlementGateway 入口。
+- heartbeat ping 成功后同步标记 Registry alive，让 Agent 可发现。
+
+HTTP server 只应该是薄 transport，把请求解析成 `PlatformApp` 方法调用；不能绕过 `PlatformApp` 直接调用底层组件。
+
+---
+
 ## 传输层
 
 Server 通过 HTTP/JSON 或 gRPC 对外暴露原语，与 Agent 的编程语言无关。
+
+第一版实现使用 HTTP/JSON：
+
+```text
+src/server/http.rs          # axum router + handler
+src/bin/platform-server.rs  # 可执行入口
+```
+
+启动地址通过环境变量指定：
+
+```text
+AGENT_MARKETPLACE_ADDR=127.0.0.1:8080
+```
+
+所有需要身份的请求使用：
+
+```text
+Authorization: Bearer <agent-token>
+```
+
+所有会改变状态或资金的请求必须带：
+
+```text
+Idempotency-Key: <stable-request-key>
+```
 
 外部 API 只能暴露 Agent-facing 或业务安全入口。底层原语如果会绕过 Artifact Protocol 或 SettlementGateway，不作为外部接口暴露。
 

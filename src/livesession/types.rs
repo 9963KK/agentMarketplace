@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::artifact::ArtifactError;
 use crate::heartbeat::AgentId;
 use crate::types::{AssignmentId, OutputHash, SessionId, TaskId, Timestamp};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LiveSession {
     pub session_id: SessionId,
     pub task_id: TaskId,
@@ -16,13 +18,13 @@ pub struct LiveSession {
     pub updated_at: Timestamp,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LiveSessionStatus {
     Running,
     Closed,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Assignment {
     pub assignment_id: AssignmentId,
     pub task_id: TaskId,
@@ -35,13 +37,13 @@ pub struct Assignment {
     pub updated_at: Timestamp,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AssignmentKind {
     Execute,
     Review { target_assignment_id: AssignmentId },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AssignmentStatus {
     Assigned,
     Submitted,

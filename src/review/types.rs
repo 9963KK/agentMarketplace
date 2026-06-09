@@ -1,10 +1,13 @@
 use std::error::Error;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::livesession::AssignmentStatus;
 use crate::types::{AssignmentId, OutputHash, TaskId, Timestamp};
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
 pub struct ReviewId(String);
 
 impl ReviewId {
@@ -44,13 +47,13 @@ impl fmt::Display for ReviewId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum CriteriaFormat {
     PlainText,
     Json,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReviewCriteria {
     pub format: CriteriaFormat,
     pub body: String,
@@ -72,7 +75,7 @@ impl ReviewCriteria {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReviewSession {
     pub review_id: ReviewId,
     pub task_id: TaskId,
@@ -83,7 +86,7 @@ pub struct ReviewSession {
     pub created_at: Timestamp,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VerdictRecord {
     pub review_id: ReviewId,
     pub review_assignment_id: AssignmentId,
@@ -93,7 +96,7 @@ pub struct VerdictRecord {
     pub submitted_at: Timestamp,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReviewArtifactEvidence {
     pub review_assignment_id: AssignmentId,
     pub status: AssignmentStatus,
@@ -114,14 +117,14 @@ impl ReviewArtifactEvidence {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Verdict {
     pub kind: VerdictKind,
     pub score_bps: u16,
     pub feedback: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum VerdictKind {
     Passed,
     Failed,
