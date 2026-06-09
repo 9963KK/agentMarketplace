@@ -87,7 +87,7 @@ Settlement.hold(..., assignment_id, ...)
 Review.request(..., target_assignment_id, review_assignment_ids, ...)
 Review.collect_by_assignment()
 SettlementGateway.release_execute_after_reviews(execute_hold)
-Settlement.release(review_hold, ReviewSubmitted)
+SettlementGateway.release_review_after_submission(review_hold, review_id)
 Task.complete()
 ```
 
@@ -124,7 +124,7 @@ Heartbeat -> Runtime -> Registry
 
 Runtime 只消费 Heartbeat 事件。它不消费 Review 事件，不读取 Review verdict，不主动 release executor。
 
-执行款 release 由发布者 Agent 发起，但必须走 SettlementGateway 校验 LiveSession / Review 证据。Reviewer 款仍可用 `ReviewSubmitted` evidence 调用 Settlement 底层 release。
+执行款和 Reviewer 款 release 都由发布者 Agent 发起，但必须走 SettlementGateway 校验 LiveSession / Review 证据。Runtime 不读取 verdict，也不主动 release。
 
 ---
 

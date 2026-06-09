@@ -234,7 +234,7 @@ Capability {
 | 角色 | 什么时候拿钱 | 条件 |
 |------|-------------|------|
 | Executor | 该 assignment 最新 ReviewSession 全部 Passed | 发布者调 SettlementGateway，Gateway 校验 LiveSession + Review 后 release |
-| Reviewer | 提交 verdict 即拿钱 | 发布者调 release + `ReviewSubmitted` evidence，不论 Passed 还是 Failed |
+| Reviewer | 提交 verdict 即拿钱 | 发布者调 SettlementGateway，Gateway 校验 verdict 已提交，不论 Passed 还是 Failed |
 | 掉线 Agent | 不拿钱 | Runtime 自动 refund |
 
 注意：Runtime 只自动 refund “掉线前尚未提交、且被成功取消”的 Assignment 对应 hold。已经 `Submitted` 的 Assignment 不会被 Runtime 覆盖，避免丢失已提交产物和审查锚点。

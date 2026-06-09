@@ -97,7 +97,7 @@ impl SettlementHandle {
             .map_err(SettlementServiceError::Settlement)
     }
 
-    pub async fn release(
+    pub(crate) async fn release(
         &self,
         hold_id: impl Into<HoldId>,
         evidence: ReleaseEvidence,

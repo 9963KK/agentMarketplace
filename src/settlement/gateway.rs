@@ -116,6 +116,100 @@ impl SettlementGateway {
             .await
             .map_err(SettlementGatewayError::Settlement)
     }
+
+    pub async fn release_review_after_submission(
+        &self,
+        hold_id: impl Into<HoldId>,
+        review_id: impl Into<ReviewId>,
+        at: Timestamp,
+    ) -> Result<(), SettlementGatewayError> {
+        let hold_id = hold_id.into();
+        let review_id = review_id.into();
+        let hold = self
+            .settlement
+            .get_hold(hold_id.clone())
+            .await
+            .map_err(SettlementGatewayError::Settlement)?
+            .ok_or_else(|| SettlementGatewayError::HoldNotFound(hold_id.clone()))?;
+        if hold.kind != HoldKind::Review {
+            return Err(SettlementGatewayError::HoldKindMismatch {
+                hold_id,
+                expected: HoldKind::Review,
+                actual: hold.kind,
+            });
+        }
+
+        let assignment = self
+            .live_sessions
+            .get_assignment(hold.assignment_id.clone())
+            .await
+            .map_err(SettlementGatewayError::LiveSession)?
+            .ok_or_else(|| {
+                SettlementGatewayError::AssignmentNotFound(hold.assignment_id.clone())
+            })?;
+        let target_assignment_id = match assignment.kind {
+            AssignmentKind::Review {
+                target_assignment_id,
+            } => target_assignment_id,
+            actual => {
+                return Err(SettlementGatewayError::AssignmentKindMismatch {
+                    assignment_id: assignment.assignment_id,
+                    expected: AssignmentKind::Review {
+                        target_assignment_id: hold.assignment_id.clone(),
+                    },
+                    actual,
+                });
+            }
+        };
+        if !matches!(
+            assignment.status,
+            AssignmentStatus::Submitted | AssignmentStatus::Approved
+        ) {
+            return Err(SettlementGatewayError::ReviewAssignmentNotSubmitted {
+                assignment_id: assignment.assignment_id,
+                status: assignment.status,
+            });
+        }
+
+        let verdicts = self
+            .review
+            .collect(review_id.clone())
+            .await
+            .map_err(SettlementGatewayError::Review)?
+            .ok_or_else(|| SettlementGatewayError::NoReviewSession {
+                assignment_id: target_assignment_id.clone(),
+            })?;
+        let Some(verdict) = verdicts
+            .iter()
+            .find(|verdict| verdict.review_assignment_id == hold.assignment_id)
+        else {
+            return Err(SettlementGatewayError::ReviewVerdictMissing {
+                review_id: review_id.clone(),
+                review_assignment_id: hold.assignment_id,
+            });
+        };
+        if verdict.target_assignment_id != target_assignment_id {
+            return Err(SettlementGatewayError::ReviewTargetMismatch {
+                review_id: review_id.clone(),
+                review_assignment_id: verdict.review_assignment_id.clone(),
+                expected_target_assignment_id: target_assignment_id,
+                actual_target_assignment_id: verdict.target_assignment_id.clone(),
+            });
+        }
+
+        self.settlement
+            .release(
+                hold.hold_id,
+                ReleaseEvidence::ReviewSubmitted {
+                    task_id: hold.task_id,
+                    assignment_id: hold.assignment_id,
+                    review_id,
+                },
+                at,
+            )
+            .await
+            .map_err(SettlementGatewayError::Settlement)
+    }
 }
 
 fn latest_review_session(review_sessions: &[ReviewSession]) -> Option<&ReviewSession> {
@@ -220,6 +314,12 @@ pub enum SettlementGatewayError {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
     },
+    ReviewTargetMismatch {
+        review_id: ReviewId,
+        review_assignment_id: AssignmentId,
+        expected_target_assignment_id: AssignmentId,
+        actual_target_assignment_id: AssignmentId,
+    },
     ReviewVerdictNotPassed {
         review_id: ReviewId,
         review_assignment_id: AssignmentId,
@@ -298,6 +398,15 @@ impl fmt::Display for SettlementGatewayError {
                 f,
                 "review {review_id} is missing verdict from review assignment {review_assignment_id}"
             ),
+            SettlementGatewayError::ReviewTargetMismatch {
+                review_id,
+                review_assignment_id,
+                expected_target_assignment_id,
+                actual_target_assignment_id,
+            } => write!(
+                f,
+                "review {review_id} target mismatch for review assignment {review_assignment_id}: expected={expected_target_assignment_id}, actual={actual_target_assignment_id}"
+            ),
             SettlementGatewayError::ReviewVerdictNotPassed {
                 review_id,
                 review_assignment_id,
@@ -365,6 +474,8 @@ mod tests {
         HoldId,
         AssignmentId,
         AssignmentId,
+        HoldId,
+        ReviewId,
     ) {
         let settlement = SettlementService::spawn();
         let live_sessions = LiveSessionService::spawn();
@@ -392,7 +503,7 @@ mod tests {
             .await
             .unwrap();
         settlement
-            .deposit(publisher.clone(), 100, Timestamp(4))
+            .deposit(publisher.clone(), 130, Timestamp(4))
             .await
             .unwrap();
         let hold_id = settlement
@@ -431,12 +542,26 @@ mod tests {
             )
             .await
             .unwrap();
+        let review_hold_id = settlement
+            .hold(
+                HoldRequest::new(
+                    AgentId::from("publisher"),
+                    30,
+                    task_id.clone(),
+                    review_assignment.clone(),
+                    AgentId::from("reviewer"),
+                    HoldKind::Review,
+                ),
+                Timestamp(8),
+            )
+            .await
+            .unwrap();
         live_sessions
             .submit_output(
                 review_assignment.clone(),
                 reviewer,
                 "review-output",
-                Timestamp(8),
+                Timestamp(9),
             )
             .await
             .unwrap();
@@ -446,13 +571,13 @@ mod tests {
                 execute_assignment.clone(),
                 vec![review_assignment.clone()],
                 ReviewCriteria::plain_text("review execute output"),
-                Timestamp(9),
+                Timestamp(10),
             )
             .await
             .unwrap();
         let evidence = submitted_artifact_evidence(&live_sessions, review_assignment.clone()).await;
         review
-            .submit(review_id, evidence, verdict, Timestamp(10))
+            .submit(review_id.clone(), evidence, verdict, Timestamp(11))
             .await
             .unwrap();
 
@@ -466,12 +591,14 @@ mod tests {
             hold_id,
             execute_assignment,
             review_assignment,
+            review_hold_id,
+            review_id,
         )
     }
 
     #[tokio::test]
     async fn gateway_releases_execute_hold_after_latest_review_passes() {
-        let (gateway, settlement, live_sessions, review, hold_id, _, _) =
+        let (gateway, settlement, live_sessions, review, hold_id, _, _, _, _) =
             setup_reviewed_execute(passed_verdict()).await;
 
         gateway
@@ -553,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_rejects_execute_release_when_latest_review_fails() {
-        let (gateway, settlement, live_sessions, review, hold_id, _, review_assignment) =
+        let (gateway, settlement, live_sessions, review, hold_id, _, review_assignment, _, _) =
             setup_reviewed_execute(failed_verdict()).await;
 
         let error = gateway
@@ -570,6 +697,22 @@ mod tests {
             } if review_assignment_id == review_assignment
         ));
         assert_eq!(settlement.balance("executor").await.unwrap(), 0);
+        settlement.shutdown().await.unwrap();
+        live_sessions.shutdown().await.unwrap();
+        review.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_releases_review_hold_after_verdict_submission() {
+        let (gateway, settlement, live_sessions, review, _, _, _, review_hold_id, review_id) =
+            setup_reviewed_execute(failed_verdict()).await;
+
+        gateway
+            .release_review_after_submission(review_hold_id, review_id, Timestamp(12))
+            .await
+            .unwrap();
+
+        assert_eq!(settlement.balance("reviewer").await.unwrap(), 30);
         settlement.shutdown().await.unwrap();
         live_sessions.shutdown().await.unwrap();
         review.shutdown().await.unwrap();

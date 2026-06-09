@@ -10,13 +10,14 @@
 |------|------|
 | `deposit(agent, amount)` | 充值 |
 | `hold(request)` | 托管资金（扣余额），request 内绑定任务、Assignment、收款 Agent 和 HoldKind |
-| `release(hold_id, evidence)` | 放款（需 evidence） |
+| `release(hold_id, evidence)` | 底层放款原语，由 Gateway / 内部服务使用 |
 | `refund(hold_id)` | 退款（退回 from_agent） |
 | `balance(agent)` | 查询余额 |
 | `get_hold(hold_id)` | 查询托管详情 |
 | `active_holds_for_agent(agent)` | 查某 Agent 名下所有活跃托管 |
 | `ledger()` | 查询完整流水 |
 | `release_execute_after_reviews(hold_id)` | 业务放款入口：校验 Execute Assignment 最新 ReviewSession 全部 Passed 后放款 |
+| `release_review_after_submission(hold_id, review_id)` | 业务放款入口：校验 Review Assignment 已提交 verdict 后放款 |
 
 ---
 
@@ -70,7 +71,7 @@ enum HoldKind {
 
 Reviewer 交稿即放款（不管 Passed/Failed）。Executor 必须通过对应 Review 才放款。
 
-SettlementCore 不直接查 Review。执行款业务放款走 SettlementGateway，由它读取 LiveSession / Review 后构造 release evidence。
+SettlementCore 不直接查 Review。业务放款走 SettlementGateway，由它读取 LiveSession / Review 后构造 release evidence。
 
 ---
 
@@ -102,6 +103,8 @@ enum ReleaseEvidence {
 
 SettlementGateway 校验规则：
 
+执行款：
+
 - hold 必须是 `HoldKind::Execute`
 - Execute Assignment 必须已经 `Submitted` 或 `Approved`
 - LiveSession 必须存在指向该 Execute Assignment 的 Review Assignment
@@ -109,6 +112,13 @@ SettlementGateway 校验规则：
 - 取最新 ReviewSession，里面声明的所有 Review Assignment 都必须来自 LiveSession 绑定关系
 - 这些 Review Assignment 必须已经 `Submitted` 或 `Approved`
 - 这些 Review Assignment 都必须提交 `Passed` verdict
+
+审查款：
+
+- hold 必须是 `HoldKind::Review`
+- Review Assignment 必须已经 `Submitted` 或 `Approved`
+- 指定 `review_id` 中必须存在该 Review Assignment 提交的 verdict
+- verdict 的 `target_assignment_id` 必须等于 Review Assignment 指向的 Execute Assignment
 
 ---
 
@@ -138,7 +148,7 @@ Review Agent 的结算：
 hold(HoldRequest { from_agent: publisher, amount: 20, task_id: task_1, assignment_id: review_assignment_1, agent_id: R1, kind: Review })
 
 R1 submit verdict
-  -> release(hold, ReviewSubmitted { assignment_id = review_assignment_1 })
+  -> release_review_after_submission(hold, review_id)
   -> R1.balance += 20
 ```
 

@@ -13,8 +13,7 @@ use agent_marketplace::review::{
 };
 use agent_marketplace::runtime::Runtime;
 use agent_marketplace::settlement::{
-    HoldKind, HoldRequest, HoldStatus, ReleaseEvidence, SettlementGateway, SettlementHandle,
-    SettlementService,
+    HoldKind, HoldRequest, HoldStatus, SettlementGateway, SettlementHandle, SettlementService,
 };
 use agent_marketplace::task::{TaskHandle, TaskService, TaskStatus};
 use agent_marketplace::types::{AssignmentId, TaskId, Timestamp};
@@ -330,16 +329,8 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
         .await
         .unwrap();
     stack
-        .settlement
-        .release(
-            review_hold.clone(),
-            ReleaseEvidence::ReviewSubmitted {
-                task_id: task_id.clone(),
-                assignment_id: review_assignment.clone(),
-                review_id: review_id.clone(),
-            },
-            Timestamp(14),
-        )
+        .settlement_gateway()
+        .release_review_after_submission(review_hold.clone(), review_id.clone(), Timestamp(14))
         .await
         .unwrap();
     stack
@@ -1063,14 +1054,10 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
         .await
         .unwrap();
     stack
-        .settlement
-        .release(
+        .settlement_gateway()
+        .release_review_after_submission(
             second_review_hold,
-            ReleaseEvidence::ReviewSubmitted {
-                task_id: task_id.clone(),
-                assignment_id: second_review_assignment.clone(),
-                review_id: second_review_id.clone(),
-            },
+            second_review_id.clone(),
             Timestamp(19),
         )
         .await
@@ -1255,16 +1242,8 @@ async fn business_flow_failed_review_pays_reviewer_refunds_executor_and_cancels_
         .unwrap();
 
     stack
-        .settlement
-        .release(
-            review_hold,
-            ReleaseEvidence::ReviewSubmitted {
-                task_id: task_id.clone(),
-                assignment_id: review_assignment.clone(),
-                review_id: review_id.clone(),
-            },
-            Timestamp(14),
-        )
+        .settlement_gateway()
+        .release_review_after_submission(review_hold, review_id.clone(), Timestamp(14))
         .await
         .unwrap();
     stack

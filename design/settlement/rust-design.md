@@ -21,12 +21,12 @@ Settlement 不定价，不选择 Agent，不读取 Review，不判断审查是�
 ```text
 SettlementCore      纯状态机
 SettlementService   Tokio 命令循环
-SettlementGateway   执行款 release 前的跨组件证据校验入口
+SettlementGateway   业务 release 前的跨组件证据校验入口
 ```
 
 `SettlementCore` 不读系统时间，不访问网络，不调用 Review / LiveSession / Task。所有时间和 release evidence 由调用方传入。
 
-`SettlementGateway` 不是任务编排器，不选择 Agent，不创建 Assignment。它只在发布者 Agent 发起执行款结算时读取 LiveSession / Review，确认该 Execute Assignment 已挂载 Review Assignment 且最新 ReviewSession 全部 Passed，然后调用 `SettlementHandle.release()`。
+`SettlementGateway` 不是任务编排器，不选择 Agent，不创建 Assignment。它只在发布者 Agent 发起结算时读取 LiveSession / Review，确认执行款或审查款满足平台证据规则，然后调用 crate 内部的 `SettlementHandle.release()`。
 
 ## 模块结构
 
@@ -118,7 +118,7 @@ pub enum ReleaseEvidence {
 - evidence 类型必须匹配 `HoldKind`
 - `AssignmentOutputAccepted.review_ids` 不能为空
 
-SettlementCore 不校验 Review 是否真的 Passed，也不反查 Review / LiveSession 状态。Review 组件在 `submit()` 时校验 review assignment 已提交 artifact；执行款业务放款由 `SettlementGateway` 读取 LiveSession / Review 后调用底层 `release()`。
+SettlementCore 不校验 Review 是否真的 Passed，也不反查 Review / LiveSession 状态。Review 组件在 `submit()` 时校验 review assignment 已提交 artifact；业务放款由 `SettlementGateway` 读取 LiveSession / Review 后调用底层 `release()`。
 
 ## 核心原语
 
@@ -176,6 +176,13 @@ impl SettlementGateway {
         hold_id: HoldId,
         at: Timestamp,
     ) -> Result<(), SettlementGatewayError>;
+
+    pub async fn release_review_after_submission(
+        &self,
+        hold_id: HoldId,
+        review_id: ReviewId,
+        at: Timestamp,
+    ) -> Result<(), SettlementGatewayError>;
 }
 ```
 
@@ -190,7 +197,16 @@ impl SettlementGateway {
 - 每个 Review Assignment 必须在最新 ReviewSession 中提交 `Passed` verdict
 - 校验通过后，由 Gateway 构造 `AssignmentOutputAccepted` evidence 并调用 `SettlementHandle.release()`
 
-这个 gateway 把“执行款必须经过审查”变成平台校验，不改变“发布者 Agent 负责编排和选择 Agent”的边界。
+`release_review_after_submission()` 的校验顺序：
+
+- 查询 hold，要求 `hold.kind == HoldKind::Review`
+- 查询 `hold.assignment_id` 对应的 Assignment，要求它是 `Review { target_assignment_id }`
+- Review Assignment 状态必须是 `Submitted` 或 `Approved`
+- 查询指定 `review_id` 的 verdict 集合，要求存在该 `review_assignment_id` 的 verdict
+- verdict 的 `target_assignment_id` 必须等于 Review Assignment 指向的 Execute Assignment
+- 校验通过后，由 Gateway 构造 `ReviewSubmitted` evidence 并调用 `SettlementHandle.release()`
+
+这个 gateway 把“执行款必须经过审查”和“审查款必须真的提交 verdict”变成平台校验，不改变“发布者 Agent 负责编排和选择 Agent”的边界。
 
 ## 资金生命周期
 
@@ -273,6 +289,10 @@ LiveSession.assign()
 Review.submit()
   -> SettlementGateway.release_execute_after_reviews(hold_id, at)
   -> Settlement.release(hold_id, AssignmentOutputAccepted, at)
+
+Review.submit()
+  -> SettlementGateway.release_review_after_submission(review_hold_id, review_id, at)
+  -> Settlement.release(review_hold_id, ReviewSubmitted, at)
 
 Heartbeat timeout
   -> Runtime 取消该 Agent 名下 Assigned Assignment

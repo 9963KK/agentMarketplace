@@ -79,7 +79,7 @@ Review Agent 提交 verdict
   -> executor hold 可以通过 SettlementGateway release
 ```
 
-Review 不直接放款。Settlement 执行资金变化；执行款由 SettlementGateway 校验 Review 记录后放款，Reviewer 款由发布者 Agent 用 `ReviewSubmitted` evidence 触发。
+Review 不直接放款。Settlement 执行资金变化；执行款由 SettlementGateway 校验 Review 记录后放款，Reviewer 款由 SettlementGateway 校验该 Review Assignment 已提交 verdict 后放款。
 
 ## 重做流程
 
