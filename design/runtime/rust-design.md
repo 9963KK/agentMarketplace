@@ -246,7 +246,7 @@ LiveSession.assign()
 Settlement.hold()
 Review.request()
 Review.collect_by_assignment()
-Settlement.release()
+SettlementGateway.release_execute_after_reviews()
 Task.complete()
 ```
 

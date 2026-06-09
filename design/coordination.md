@@ -78,6 +78,8 @@ Capability {
 
 发起 Agent 根据 `output_profiles -> input_profiles` 判断链路是否兼容。平台只校验 profile 是否属于 baseline，不做转码，不替 Agent 排链路。
 
+如果一个任务由多个执行 Agent 串联或并行完成，发布者 Agent 仍然自己保存链路顺序；但每个需要结算的 Execute Assignment 都应创建对应 Review Assignment。平台通过 LiveSession 的 `Review { target_assignment_id }` 关系知道某个执行节点是否已经挂载审查节点。
+
 ---
 
 ## 业务流转：完整任务生命周期
@@ -158,7 +160,7 @@ Capability {
      │     verdict: Failed) ───►│  review: verdict 追加
      │                          │
      │                          │  settlement: R2 可 release（交稿即放款）
-     │                          │  settlement: B 不可 release（有 Failed）
+     │                          │  settlement_gateway: B 不可 release（有 Failed）
 
 
 阶段三A: Settlement — 全部 Passed
@@ -166,9 +168,8 @@ Capability {
 
   发布者 A collect verdicts → 全部 Passed
      │
-     │── settle_executor(assignment_1) ──►│  settlement.release(
-     │                                     │    execute_hold,
-     │                                     │    AssignmentOutputAccepted)
+     │── settle_executor(assignment_1) ──►│  settlement_gateway.release_execute_after_reviews(
+     │                                     │    execute_hold)
      │                                     │  B 到账 ✅
      │
      │── task.complete(task_1) ───────────►│  任务关闭
@@ -184,7 +185,8 @@ Capability {
      │  B 重新 submit_artifact           │
      │  R2 重新 submit verdict: Passed   │
      │
-     │── settle_executor(assignment_1) ──►│  B 到账 ✅
+     │── settle_executor(assignment_1) ──►│  settlement_gateway 校验最新 ReviewSession 后
+     │                                     │  B 到账 ✅
 
 
 阶段三C: Settlement — 有 Failed → 换人
@@ -199,7 +201,8 @@ Capability {
      │
      │  C 执行 → 审查 → Passed
      │
-     │── settle_executor(assignment_4) ──►│  C 到账 ✅
+     │── settle_executor(assignment_4) ──►│  settlement_gateway 校验 assignment_4 的 Review 后
+     │                                     │  C 到账 ✅
 
 
 阶段四: 掉线处理（随时可能发生）
@@ -230,7 +233,7 @@ Capability {
 
 | 角色 | 什么时候拿钱 | 条件 |
 |------|-------------|------|
-| Executor | 该 assignment 所有 Review 都 Passed | 发布者调 release + `AssignmentOutputAccepted` evidence |
+| Executor | 该 assignment 最新 ReviewSession 全部 Passed | 发布者调 SettlementGateway，Gateway 校验 LiveSession + Review 后 release |
 | Reviewer | 提交 verdict 即拿钱 | 发布者调 release + `ReviewSubmitted` evidence，不论 Passed 还是 Failed |
 | 掉线 Agent | 不拿钱 | Runtime 自动 refund |
 

@@ -15,6 +15,7 @@ pub struct LiveSessionCore {
     assignments_by_task: HashMap<TaskId, HashSet<AssignmentId>>,
     assignments_by_session: HashMap<SessionId, HashSet<AssignmentId>>,
     assignments_by_agent: HashMap<AgentId, HashSet<AssignmentId>>,
+    review_assignments_by_target: HashMap<AssignmentId, HashSet<AssignmentId>>,
     next_session: u64,
     next_assignment: u64,
 }
@@ -80,6 +81,12 @@ impl LiveSessionCore {
         self.validate_assignment_kind(&task_id, &kind)?;
 
         let assignment_id = self.next_assignment_id();
+        let review_target = match &kind {
+            AssignmentKind::Review {
+                target_assignment_id,
+            } => Some(target_assignment_id.clone()),
+            AssignmentKind::Execute => None,
+        };
         self.assignments.insert(
             assignment_id.clone(),
             Assignment {
@@ -115,6 +122,12 @@ impl LiveSessionCore {
             .entry(agent_id)
             .or_default()
             .insert(assignment_id.clone());
+        if let Some(target_assignment_id) = review_target {
+            self.review_assignments_by_target
+                .entry(target_assignment_id)
+                .or_default()
+                .insert(assignment_id.clone());
+        }
 
         Ok(assignment_id)
     }
@@ -259,6 +272,13 @@ impl LiveSessionCore {
 
     pub fn assignments_by_agent(&self, agent_id: &AgentId) -> Vec<Assignment> {
         self.assignments_from_index(self.assignments_by_agent.get(agent_id))
+    }
+
+    pub fn review_assignments_for_target(
+        &self,
+        target_assignment_id: &AssignmentId,
+    ) -> Vec<Assignment> {
+        self.assignments_from_index(self.review_assignments_by_target.get(target_assignment_id))
     }
 
     fn mark_reviewed(
@@ -560,8 +580,13 @@ mod tests {
         assert_eq!(
             core.get_assignment(&review).unwrap().kind,
             AssignmentKind::Review {
-                target_assignment_id: execute
+                target_assignment_id: execute.clone()
             }
+        );
+        assert_eq!(core.review_assignments_for_target(&execute).len(), 1);
+        assert_eq!(
+            core.review_assignments_for_target(&execute)[0].assignment_id,
+            review
         );
     }
 

@@ -14,13 +14,13 @@
 | 状态 | 阈值 | 超时后果 |
 |------|------|---------|
 | 空闲 | 45s | 标记离线 |
-| 忙碌 | 15s | 标记离线，Settlement 自动退款 |
+| 忙碌 | 15s | 标记离线；Runtime 对未提交且成功取消的 Assignment 执行 refund |
 
 ## 事件
 
 | 事件 | 谁关心 |
 |------|--------|
-| `AgentTimedOut { agent_id }` | Registry（移除索引）、Settlement（自动退款） |
+| `AgentTimedOut { agent_id }` | Registry（移除索引）、Runtime（取消未提交 Assignment 并触发对应 refund） |
 | `AgentRecovered { agent_id }` | Registry（恢复可发现） |
 
 ## 不是 Heartbeat 的事

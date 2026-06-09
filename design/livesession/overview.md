@@ -102,6 +102,7 @@ task_1
 | `assignments_by_task(task_id)` | 查询任务下全部 Assignment |
 | `assignments_by_session(session_id)` | 查询当前批次 Assignment |
 | `assignments_by_agent(agent_id)` | 查询某 Agent 的 Assignment |
+| `review_assignments_for_target(target_assignment_id)` | 查询某个 Execute Assignment 绑定的 Review Assignment |
 
 ---
 
@@ -154,6 +155,8 @@ Review verdict:
 - 它自己的审查工作是否已提交
 - 它自己的结算应该绑定哪份 Assignment
 
+LiveSession 维护 `target_assignment_id -> review_assignment_ids` 索引。买家 Agent 仍然负责选择 reviewer 并创建 Review Assignment，但一旦创建，平台就能知道某个 Execute Assignment 是否已经挂载审查节点。
+
 ---
 
 ## Settlement 关系
@@ -181,11 +184,11 @@ struct Hold {
 Review Assignment 提交 verdict
   -> release reviewer assignment 的 hold
 
-Execute Assignment 的所有目标 Review 都 Passed
-  -> release execute assignment 的 hold
+Execute Assignment 的最新 ReviewSession 全部 Passed
+  -> SettlementGateway 校验 LiveSession + Review 后 release execute assignment 的 hold
 ```
 
-Settlement 不判断 Review 是否通过。发布者 Agent 或后续 Policy 层提供 release evidence。
+SettlementCore 不判断 Review 是否通过。执行款业务放款走 SettlementGateway：它读取 LiveSession 的 Review Assignment 绑定关系和 Review 的 verdict，再调用 SettlementCore 的底层 release 原语。
 
 ---
 
@@ -215,7 +218,7 @@ Task.add_participant(task_id, assignment.agent_id)
 | 上下游依赖 | 发布者 Agent 自己管 |
 | artifact 内容存储 | Agent 自己或社区存储网络保存 |
 | 自动选择 Agent | 发布者 Agent 通过 Registry 选择 |
-| 自动判断是否通过 | 发布者 Agent 或后续 Policy |
-| 自动放款 | Settlement 执行，触发者提供 evidence |
+| 自动判断是否通过 | 发布者 Agent 决定是否发起 settle；SettlementGateway 校验平台内已有审查证据 |
+| 自动放款 | Settlement 执行；执行款 release 由 SettlementGateway 校验后触发 |
 
 第一版只把完成、审查、结算锚定到 `assignment_id`，不引入 Chain。

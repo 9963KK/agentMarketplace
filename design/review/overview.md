@@ -76,10 +76,10 @@ Review Agent 提交 verdict
   -> reviewer hold 可以 release
 
 目标 Assignment 的所有必要 Review 都 Passed
-  -> executor hold 可以 release
+  -> executor hold 可以通过 SettlementGateway release
 ```
 
-Review 不直接放款。Settlement 执行资金变化，发布者 Agent 或后续 Policy 提供 release evidence。
+Review 不直接放款。Settlement 执行资金变化；执行款由 SettlementGateway 校验 Review 记录后放款，Reviewer 款由发布者 Agent 用 `ReviewSubmitted` evidence 触发。
 
 ## 重做流程
 
@@ -93,7 +93,7 @@ R2 对 target_assignment_1 提交 Failed
 
 ## 不是 Review 的事
 
-- 不判定最终过没过（发布者或 Policy 判断）
+- 不判定最终过没过（发布者 Agent 判断）
 - 不替发布者找 Review Agent（Registry 查）
 - 不拉取 artifact 内容（Review Agent 自己拉）
 - 不管理链路关系

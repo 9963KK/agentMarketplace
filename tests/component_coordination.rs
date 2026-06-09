@@ -13,7 +13,8 @@ use agent_marketplace::review::{
 };
 use agent_marketplace::runtime::Runtime;
 use agent_marketplace::settlement::{
-    HoldKind, HoldRequest, HoldStatus, ReleaseEvidence, SettlementHandle, SettlementService,
+    HoldKind, HoldRequest, HoldStatus, ReleaseEvidence, SettlementGateway, SettlementHandle,
+    SettlementService,
 };
 use agent_marketplace::task::{TaskHandle, TaskService, TaskStatus};
 use agent_marketplace::types::{AssignmentId, TaskId, Timestamp};
@@ -43,6 +44,14 @@ impl ComponentStack {
             self.settlement.clone(),
             self.live_sessions.clone(),
             self.tasks.clone(),
+        )
+    }
+
+    fn settlement_gateway(&self) -> SettlementGateway {
+        SettlementGateway::new(
+            self.settlement.clone(),
+            self.live_sessions.clone(),
+            self.review.clone(),
         )
     }
 
@@ -339,16 +348,8 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
         .await
         .unwrap();
     stack
-        .settlement
-        .release(
-            execute_hold.clone(),
-            ReleaseEvidence::AssignmentOutputAccepted {
-                task_id: task_id.clone(),
-                assignment_id: execute_assignment.clone(),
-                review_ids: vec![review_id.clone()],
-            },
-            Timestamp(16),
-        )
+        .settlement_gateway()
+        .release_execute_after_reviews(execute_hold.clone(), Timestamp(16))
         .await
         .unwrap();
     stack
@@ -1080,16 +1081,8 @@ async fn business_flow_replaces_timed_out_reviewer_and_completes_task() {
         .await
         .unwrap();
     stack
-        .settlement
-        .release(
-            execute_hold,
-            ReleaseEvidence::AssignmentOutputAccepted {
-                task_id: task_id.clone(),
-                assignment_id: execute_assignment.clone(),
-                review_ids: vec![second_review_id],
-            },
-            Timestamp(21),
-        )
+        .settlement_gateway()
+        .release_execute_after_reviews(execute_hold, Timestamp(21))
         .await
         .unwrap();
     stack

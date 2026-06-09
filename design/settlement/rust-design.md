@@ -21,9 +21,12 @@ Settlement 不定价，不选择 Agent，不读取 Review，不判断审查是�
 ```text
 SettlementCore      纯状态机
 SettlementService   Tokio 命令循环
+SettlementGateway   执行款 release 前的跨组件证据校验入口
 ```
 
 `SettlementCore` 不读系统时间，不访问网络，不调用 Review / LiveSession / Task。所有时间和 release evidence 由调用方传入。
+
+`SettlementGateway` 不是任务编排器，不选择 Agent，不创建 Assignment。它只在发布者 Agent 发起执行款结算时读取 LiveSession / Review，确认该 Execute Assignment 已挂载 Review Assignment 且最新 ReviewSession 全部 Passed，然后调用 `SettlementHandle.release()`。
 
 ## 模块结构
 
@@ -32,6 +35,7 @@ src/
 ├── settlement/
 │   ├── mod.rs
 │   ├── core.rs       # 纯资金状态机
+│   ├── gateway.rs    # 执行款 release 前的 LiveSession / Review 证据校验
 │   ├── service.rs    # Tokio 命令循环
 │   └── types.rs      # Hold、Ledger、ReleaseEvidence、错误
 ├── livesession/
@@ -114,7 +118,7 @@ pub enum ReleaseEvidence {
 - evidence 类型必须匹配 `HoldKind`
 - `AssignmentOutputAccepted.review_ids` 不能为空
 
-Settlement 不校验 Review 是否真的 Passed，也不校验 Review Assignment 是否真的提交。发布者 Agent 或后续 Policy 层负责做这些判断后再调用 `release()`。
+SettlementCore 不校验 Review 是否真的 Passed，也不反查 Review / LiveSession 状态。Review 组件在 `submit()` 时校验 review assignment 已提交 artifact；执行款业务放款由 `SettlementGateway` 读取 LiveSession / Review 后调用底层 `release()`。
 
 ## 核心原语
 
@@ -157,6 +161,37 @@ impl SettlementCore {
 
 `active_holds_for_agent()` 返回和该 Agent 相关的所有 Active hold，包括 Agent 作为付款方或收款方的 hold。Runtime 掉线退款会额外过滤 `hold.agent_id == timed_out_agent`，并且只退款本次 timeout 已取消 Assignment 对应的 hold。
 
+## SettlementGateway
+
+```rust
+pub struct SettlementGateway {
+    settlement: SettlementHandle,
+    live_sessions: LiveSessionHandle,
+    review: ReviewHandle,
+}
+
+impl SettlementGateway {
+    pub async fn release_execute_after_reviews(
+        &self,
+        hold_id: HoldId,
+        at: Timestamp,
+    ) -> Result<(), SettlementGatewayError>;
+}
+```
+
+`release_execute_after_reviews()` 的校验顺序：
+
+- 查询 hold，要求 `hold.kind == HoldKind::Execute`
+- 查询 `hold.assignment_id` 对应的 Assignment，要求它是 `Execute` 且状态为 `Submitted` 或 `Approved`
+- 查询 `LiveSession.review_assignments_for_target(hold.assignment_id)`，要求至少有一个 Review Assignment
+- 查询 `Review.collect_by_assignment(hold.assignment_id)`，取最新 ReviewSession
+- 最新 ReviewSession 中声明的每个 `review_assignment_id` 都必须来自 LiveSession 的 target 绑定关系
+- 每个 Review Assignment 状态必须是 `Submitted` 或 `Approved`
+- 每个 Review Assignment 必须在最新 ReviewSession 中提交 `Passed` verdict
+- 校验通过后，由 Gateway 构造 `AssignmentOutputAccepted` evidence 并调用 `SettlementHandle.release()`
+
+这个 gateway 把“执行款必须经过审查”变成平台校验，不改变“发布者 Agent 负责编排和选择 Agent”的边界。
+
 ## 资金生命周期
 
 ```text
@@ -170,9 +205,10 @@ hold(HoldRequest { from_agent: publisher, amount: 200, task_id: task-1, assignme
   -> hold.status = Active
   -> ledger: HoldCreated
 
-release(hold, AssignmentOutputAccepted { task_id, assignment_id, review_ids })
+release_execute_after_reviews(hold)
   -> 检查 hold Active
-  -> 检查 evidence 匹配 hold
+  -> 检查 Execute Assignment 已提交
+  -> 检查最新 ReviewSession 全部 Passed
   -> executor.balance += 200
   -> hold.status = Released
   -> ledger: Released
@@ -227,7 +263,7 @@ pub enum LedgerEntryKind {
 
 ## 与其他组件的关系
 
-Settlement 不反查其他组件：
+SettlementCore 不反查其他组件，SettlementGateway 负责执行款 release 前的跨组件校验：
 
 ```text
 LiveSession.assign()
@@ -235,8 +271,8 @@ LiveSession.assign()
   -> Settlement.hold(HoldRequest { task_id, assignment_id, agent_id, kind, ... })
 
 Review.submit()
-  -> 发布者 Agent 或 Policy 判断是否可 release
-  -> Settlement.release(hold_id, evidence, at)
+  -> SettlementGateway.release_execute_after_reviews(hold_id, at)
+  -> Settlement.release(hold_id, AssignmentOutputAccepted, at)
 
 Heartbeat timeout
   -> Runtime 取消该 Agent 名下 Assigned Assignment

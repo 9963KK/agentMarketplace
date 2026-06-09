@@ -48,6 +48,7 @@ pub struct LiveSessionCore {
     assignments_by_task: HashMap<TaskId, HashSet<AssignmentId>>,
     assignments_by_session: HashMap<SessionId, HashSet<AssignmentId>>,
     assignments_by_agent: HashMap<AgentId, HashSet<AssignmentId>>,
+    review_assignments_by_target: HashMap<AssignmentId, HashSet<AssignmentId>>,
     next_session: u64,
     next_assignment: u64,
 }
@@ -76,11 +77,12 @@ pub struct Assignment {
 
 `output_hash` 当前沿用公共类型名，语义是 `artifact_manifest_hash`。完整 ArtifactManifest 遵守 `design/artifact/overview.md`，由 Agent 之间传递或由生产 Agent 保存，平台只记录 hash。
 
-`sessions` 和 `assignments` 是真相源。三个索引用于快速查询：
+`sessions` 和 `assignments` 是真相源。索引用于快速查询：
 
 - `assignments_by_task`：任务维度的 Assignment 列表
 - `assignments_by_session`：运行批次维度的 Assignment 列表
 - `assignments_by_agent`：Agent 维度的 Assignment 列表
+- `review_assignments_by_target`：某个 Execute Assignment 绑定的 Review Assignment 列表
 
 ## Assignment 类型
 
@@ -223,6 +225,7 @@ impl LiveSessionCore {
     pub fn assignments_by_task(&self, task_id: &TaskId) -> Vec<Assignment>;
     pub fn assignments_by_session(&self, session_id: &SessionId) -> Vec<Assignment>;
     pub fn assignments_by_agent(&self, agent_id: &AgentId) -> Vec<Assignment>;
+    pub fn review_assignments_for_target(&self, target_assignment_id: &AssignmentId) -> Vec<Assignment>;
 }
 ```
 
@@ -236,6 +239,7 @@ impl LiveSessionCore {
 - 只有 `Running` session 可以新增 Assignment
 - `assign.task_id` 必须等于 session 的 `task_id`
 - Review Assignment 只能指向同任务内的 Execute Assignment
+- 创建 Review Assignment 时必须写入 `review_assignments_by_target`
 - `submit_artifact.agent_id` / `submit_output.agent_id` 必须等于 Assignment 的 `agent_id`
 - `submit_artifact` / `submit_output` 只能发生在 `Assigned`
 - `submit_artifact` 必须提交符合 Artifact Protocol 的 manifest，且 manifest 的 `task_id` / `assignment_id` / `producer_agent_id` 必须与 Assignment 匹配
@@ -258,6 +262,7 @@ Review.request(..., target_assignment_id, review_assignment_ids, ...)
 ```
 
 Review 用 `target_assignment_id` 和 `review_assignment_id` 记录 verdict。
+SettlementGateway 用 `review_assignments_for_target()` 确认 Execute Assignment 已挂载 Review Assignment，再结合 Review verdict 判断是否允许执行款 release。
 
 Settlement 用 `assignment_id` 和 `agent_id` 绑定托管资金。
 
@@ -338,6 +343,7 @@ pub enum LiveSessionCommand {
     AssignmentsByTask { task_id: TaskId, reply: oneshot::Sender<Vec<Assignment>> },
     AssignmentsBySession { session_id: SessionId, reply: oneshot::Sender<Vec<Assignment>> },
     AssignmentsByAgent { agent_id: AgentId, reply: oneshot::Sender<Vec<Assignment>> },
+    ReviewAssignmentsForTarget { target_assignment_id: AssignmentId, reply: oneshot::Sender<Vec<Assignment>> },
     Shutdown { reply: oneshot::Sender<()> },
 }
 ```
@@ -357,6 +363,7 @@ pub enum LiveSessionCommand {
 - assign Review 时校验 target 存在
 - assign Review 时拒绝非 Execute target
 - assign Review 时拒绝跨任务 target
+- assign Review 后可通过 target 查询到 Review Assignment
 - submit output 校验承担 Agent
 - submit artifact 校验 task / assignment / producer / media profile 并保存 manifest hash
 - submit artifact / output 只能从 `Assigned` 进入 `Submitted`

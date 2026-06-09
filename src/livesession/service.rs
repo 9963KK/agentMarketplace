@@ -86,6 +86,10 @@ pub enum LiveSessionCommand {
         agent_id: AgentId,
         reply: oneshot::Sender<Vec<Assignment>>,
     },
+    ReviewAssignmentsForTarget {
+        target_assignment_id: AssignmentId,
+        reply: oneshot::Sender<Vec<Assignment>>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },
@@ -347,6 +351,21 @@ impl LiveSessionHandle {
             .map_err(|_| LiveSessionServiceError::ResponseDropped)
     }
 
+    pub async fn review_assignments_for_target(
+        &self,
+        target_assignment_id: impl Into<AssignmentId>,
+    ) -> Result<Vec<Assignment>, LiveSessionServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(LiveSessionCommand::ReviewAssignmentsForTarget {
+            target_assignment_id: target_assignment_id.into(),
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| LiveSessionServiceError::ResponseDropped)
+    }
+
     pub async fn shutdown(&self) -> Result<(), LiveSessionServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(LiveSessionCommand::Shutdown { reply }).await?;
@@ -533,6 +552,16 @@ impl LiveSessionService {
                 let _ = reply.send(self.core.assignments_by_agent(&agent_id));
                 None
             }
+            LiveSessionCommand::ReviewAssignmentsForTarget {
+                target_assignment_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.core
+                        .review_assignments_for_target(&target_assignment_id),
+                );
+                None
+            }
             LiveSessionCommand::Shutdown { reply } => Some(reply),
         }
     }
@@ -600,6 +629,42 @@ mod tests {
             live.assignments_by_session(session_id).await.unwrap().len(),
             1
         );
+
+        live.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_lists_review_assignments_for_target() {
+        let live = LiveSessionService::spawn();
+
+        let session_id = live.create_session("task-1", Timestamp(1)).await.unwrap();
+        let execute = live
+            .assign(
+                "task-1",
+                session_id.clone(),
+                "executor",
+                AssignmentKind::Execute,
+                Timestamp(2),
+            )
+            .await
+            .unwrap();
+        let review = live
+            .assign(
+                "task-1",
+                session_id,
+                "reviewer",
+                AssignmentKind::Review {
+                    target_assignment_id: execute.clone(),
+                },
+                Timestamp(3),
+            )
+            .await
+            .unwrap();
+
+        let reviews = live.review_assignments_for_target(execute).await.unwrap();
+
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].assignment_id, review);
 
         live.shutdown().await.unwrap();
     }
