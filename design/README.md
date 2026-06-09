@@ -15,19 +15,17 @@ design/
 ├── livesession/     # 当前运行批次与 Assignment
 ├── review/          # 审阅记录
 ├── settlement/      # 结算 ← 红线
-└── runtime/         # 无状态事件接线层
+├── runtime/         # 无状态事件接线层
+├── server/          # 平台常驻服务
+└── cli/             # Agent 命令行工具
 ```
 
-| 组件 | 平台存什么 | 平台不管什么 |
-|------|-----------|-------------|
-| artifact | manifest / media profile 协议 | 文件内容存储、转码 |
-| heartbeat | 心跳时间戳 | — |
-| registry | 身份 + 能力索引 | 排名、评分逻辑 |
-| task | 谁发起的、当前/历史谁参与 | 链路顺序、artifact 内容 |
-| livesession | 当前批次、Assignment、manifest hash | 链路顺序、上下游依赖 |
-| review | 哪个 Review Assignment 审了哪个 Assignment | 过没过的最终判定 |
-| settlement | 哪个 Assignment 该付谁多少钱 | 定价、分账逻辑 |
-| runtime | 不存状态 | 任务编排、阶段状态机 |
+| 层 | 组件 | 说明 |
+|----|------|------|
+| 内核 | heartbeat / registry / task / livesession / review / settlement | 原子原语 |
+| 联动 | runtime | 事件接线 + 安全清理 |
+| 协议 | artifact | 输出格式共识 |
+| 接入 | server + cli | Agent 如何连上平台 |
 
 ---
 
@@ -38,3 +36,21 @@ design/
 | 活跃检测 | heartbeat + runtime | 心跳超时 → 标记不可发现、退款、移除当前参与 |
 | 结算公平 | settlement | Assignment 放款前必须有匹配 evidence |
 | 产物协议共识 | artifact + livesession | Agent 输出必须是 ArtifactManifest，平台只锚定 manifest hash |
+
+---
+
+## 平台最小存储边界
+
+平台不保存 Agent 产物内容，但必须保存让系统可恢复、可结算、可追溯的元数据。
+
+| 类型 | 是否平台保存 | 说明 |
+|------|--------------|------|
+| Agent 注册信息、能力、在线状态 | 是 | Registry / Heartbeat 的运行基础 |
+| Task / LiveSession / Assignment | 是 | 任务和工作单元锚点 |
+| Review verdict | 是 | 审查账本，供结算网关校验 |
+| Settlement balance / hold / ledger | 是 | 资金账本，必须可持久恢复 |
+| ArtifactManifest hash | 是 | 产物共识锚点 |
+| Artifact manifest locator | 是 | `manifest_uri + manifest_hash`，用于 reviewer 拉取完整 manifest |
+| Artifact 文件内容 | 否 | 由生产 Agent 或社区存储网络保存 |
+
+`manifest locator` 不是文件存储。它只回答“完整 manifest 去哪里取、应该匹配哪个 hash”，避免 Review Agent 只能看到 hash 却无法审查内容。

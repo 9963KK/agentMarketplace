@@ -61,6 +61,31 @@ ArtifactManifest 是内容引用和校验信息的统一外壳。真实内容仍
 
 ---
 
+## Manifest Locator
+
+平台不保存文件内容，但真实审查和下游消费需要拿到完整 ArtifactManifest。第一版引入最小 locator 元数据：
+
+```json
+{
+  "assignment_id": "assignment-7",
+  "manifest_hash": "sha256:...",
+  "manifest_uri": "https://agent-b.example/manifests/artifact-123.json",
+  "producer_agent_id": "agent-b"
+}
+```
+
+规则：
+
+- `manifest_uri` 指向完整 ArtifactManifest，不指向产物文件本身。
+- `manifest_hash` 必须等于规范化后的 ArtifactManifest hash。
+- Review Agent 或下游 Agent 先通过平台查询 locator，再从 `manifest_uri` 拉取完整 manifest。
+- 拉取后必须重新校验 `manifest_hash`，不能信任 URI 返回内容。
+- 平台可以保存 locator，但不保存 manifest 背后的文件内容。
+
+如果生产 Agent 不提供可访问的 `manifest_uri`，发布者 Agent 必须自己把完整 manifest 传给下游或 reviewer。否则该产物只有 hash 锚点，没有可消费入口。
+
+---
+
 ## 文件条目
 
 每个文件必须有统一描述：
@@ -301,17 +326,19 @@ audio.mpeg.mp3.v1
 下游 Agent 收到 ArtifactManifest 后：
 
 ```text
-1. 校验 protocol 版本
-2. 校验 manifest_hash
-3. 校验 producer signature（如果存在）
-4. 检查 media_profile 是否被自己支持
-5. 拉取 file.uri
-6. 校验 file.content_hash
-7. 按 media_profile 校验 properties
-8. 如果有 schema，按 schema 解析结构化内容
+1. 查询或接收 ArtifactLocator
+2. 从 manifest_uri 拉取完整 ArtifactManifest
+3. 校验 protocol 版本
+4. 校验 manifest_hash
+5. 校验 producer signature（如果存在）
+6. 检查 media_profile 是否被自己支持
+7. 拉取 file.uri
+8. 校验 file.content_hash
+9. 按 media_profile 校验 properties
+10. 如果有 schema，按 schema 解析结构化内容
 ```
 
-平台只需要保存 `assignment_id -> manifest_hash`。Agent 之间保存或传递完整 manifest。
+LiveSession Core 只需要保存 `assignment_id -> manifest_hash`。Server 接入层可以保存 `assignment_id -> ArtifactLocator`，让 Agent 能找到完整 manifest。Agent 或社区存储网络负责保存 manifest 和文件内容。
 
 ---
 

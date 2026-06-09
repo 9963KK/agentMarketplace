@@ -119,8 +119,10 @@ Capability {
      │                          │
      │── submit_artifact(       │
      │     assignment_1, B,     │
-     │     ArtifactManifest) ──►│  artifact: validate manifest/profile/hash
+     │     ArtifactManifest,    │
+     │     manifest_uri) ──────►│  artifact: validate manifest/profile/hash
      │                          │  livesession: output_hash = manifest_hash
+     │                          │  server: 保存 ArtifactLocator
      │                          │  livesession: assignment_1.status = Submitted
      │                          │
      │                          │
@@ -133,33 +135,38 @@ Capability {
      │                          │
   审查者 R1                    平台
      │                          │
-     │── 拉取 artifact uri       │  (Agent 自己拉，不走平台)
+     │── 查询 artifact locator   │  (平台返回 manifest_uri + manifest_hash)
+     │── 拉取 ArtifactManifest   │  (Agent 自己拉，不走平台存储)
+     │── 校验 manifest_hash      │
+     │── 拉取 file.uri           │
      │── 校验 content_hash       │  (Agent 自己校验文件内容)
      │                          │
      │── submit_artifact(       │
      │     assignment_2, R1,    │
      │     verdict/report       │
-     │     manifest) ──────────►│  livesession: assignment_2.status = Submitted
+     │     manifest,            │
+     │     manifest_uri) ──────►│  livesession: assignment_2.status = Submitted
      │                          │
      │── review.submit(         │
      │     review_id,           │
      │     artifact_evidence,   │
      │     verdict: Passed) ───►│  review: verdict 追加
      │                          │
-     │                          │  settlement: R1 可 release（交稿即放款）
+     │                          │  settlement_gateway: R1 可 release（交稿即放款）
      │                          │
   审查者 R2                    平台
      │                          │
      │── submit_artifact(       │
      │     assignment_3, R2,    │
      │     verdict/report       │
-     │     manifest) ──────────►│  livesession: assignment_3.status = Submitted
+     │     manifest,            │
+     │     manifest_uri) ──────►│  livesession: assignment_3.status = Submitted
      │                          │
      │── review.submit(         │
      │     artifact_evidence,   │
      │     verdict: Failed) ───►│  review: verdict 追加
      │                          │
-     │                          │  settlement: R2 可 release（交稿即放款）
+     │                          │  settlement_gateway: R2 可 release（交稿即放款）
      │                          │  settlement_gateway: B 不可 release（有 Failed）
 
 
@@ -180,12 +187,19 @@ Capability {
 
   R2: Failed → 发布者决定重做
      │
-     │── review.request(新 session)       │  旧 session 保留为历史
+     │── settlement.refund(旧 execute_hold)
      │
-     │  B 重新 submit_artifact           │
-     │  R2 重新 submit verdict: Passed   │
+     │── livesession.assign(Execute, B) → assignment_4
+     │── settlement.hold(HoldRequest(A, 200, task_1, assignment_4, B, Execute))
+     │── livesession.assign(Review, R1/R2, target=4)
+     │── settlement.hold(review holds)
      │
-     │── settle_executor(assignment_1) ──►│  settlement_gateway 校验最新 ReviewSession 后
+     │── review.request(新 session, target=4)
+     │
+     │  B submit_artifact(assignment_4)
+     │  R1/R2 submit verdict: Passed
+     │
+     │── settle_executor(assignment_4) ──►│  settlement_gateway 校验 assignment_4 的 Review 后
      │                                     │  B 到账 ✅
 
 
