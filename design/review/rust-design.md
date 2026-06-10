@@ -172,6 +172,8 @@ Review.collect_by_assignment(target_assignment_id)
 - execute assignment release 使用最新 session 的 verdict 集合
 - review assignment release 只要求该 review_assignment_id 已提交 verdict
 
+Server 在 `review.submit` 成功后调用 SettlementGateway 自动结算；Review Core 只记录 verdict，不直接执行资金变化。
+
 Review 不判断 passed / failed 的最终业务含义。
 
 ## 错误处理

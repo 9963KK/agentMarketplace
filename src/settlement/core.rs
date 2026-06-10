@@ -64,6 +64,17 @@ impl SettlementCore {
                 required: amount,
             });
         }
+        if let Some(existing) = self.holds.values().find(|hold| {
+            hold.status == HoldStatus::Active
+                && hold.assignment_id == assignment_id
+                && hold.kind == kind
+        }) {
+            return Err(SettlementError::ActiveHoldAlreadyExists {
+                assignment_id,
+                kind,
+                hold_id: existing.hold_id.clone(),
+            });
+        }
 
         let hold_id = self.next_hold_id();
         self.debit(from_agent.clone(), amount)?;
@@ -170,6 +181,25 @@ impl SettlementCore {
             })
             .cloned()
             .collect()
+    }
+
+    pub fn active_holds_for_assignment(
+        &self,
+        assignment_id: &crate::types::AssignmentId,
+        kind: HoldKind,
+    ) -> Vec<Hold> {
+        let mut holds = self
+            .holds
+            .values()
+            .filter(|hold| {
+                hold.status == HoldStatus::Active
+                    && hold.assignment_id == *assignment_id
+                    && hold.kind == kind
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        holds.sort_by(|left, right| left.hold_id.cmp(&right.hold_id));
+        holds
     }
 
     pub fn ledger(&self) -> &[LedgerEntry] {
@@ -400,6 +430,34 @@ mod tests {
         );
         assert_eq!(core.balance(&agent("publisher")), 99);
         assert_eq!(core.ledger().len(), 1);
+    }
+
+    #[test]
+    fn hold_rejects_duplicate_active_assignment_hold_by_kind() {
+        let mut core = SettlementCore::new();
+        core.deposit(agent("publisher"), 200, Timestamp(0)).unwrap();
+
+        let hold_id = core
+            .hold(
+                hold_request(100, "execute-1", "executor", HoldKind::Execute),
+                Timestamp(1),
+            )
+            .unwrap();
+
+        assert_eq!(
+            core.hold(
+                hold_request(50, "execute-1", "executor", HoldKind::Execute),
+                Timestamp(2)
+            )
+            .unwrap_err(),
+            SettlementError::ActiveHoldAlreadyExists {
+                assignment_id: assignment("execute-1"),
+                kind: HoldKind::Execute,
+                hold_id
+            }
+        );
+        assert_eq!(core.balance(&agent("publisher")), 100);
+        assert_eq!(core.ledger().len(), 2);
     }
 
     #[test]

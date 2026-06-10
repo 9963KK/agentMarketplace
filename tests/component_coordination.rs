@@ -328,19 +328,22 @@ async fn happy_path_coordinates_task_assignment_review_and_settlement() {
         )
         .await
         .unwrap();
-    stack
+    let settlement_outcome = stack
         .settlement_gateway()
-        .release_review_after_submission(review_hold.clone(), review_id.clone(), Timestamp(14))
+        .settle_after_review_submission(review_id, review_assignment.clone(), Timestamp(14))
         .await
         .unwrap();
+    assert_eq!(
+        settlement_outcome.released_review_holds,
+        vec![review_hold.clone()]
+    );
+    assert_eq!(
+        settlement_outcome.released_execute_holds,
+        vec![execute_hold.clone()]
+    );
     stack
         .live_sessions
         .mark_approved(review_assignment.clone(), Timestamp(15))
-        .await
-        .unwrap();
-    stack
-        .settlement_gateway()
-        .release_execute_after_reviews(execute_hold.clone(), Timestamp(16))
         .await
         .unwrap();
     stack

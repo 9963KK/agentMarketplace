@@ -182,10 +182,10 @@ struct Hold {
 
 ```text
 Review Assignment 提交 verdict
-  -> release reviewer assignment 的 hold
+  -> Server 触发 SettlementGateway 自动 release reviewer assignment 的 hold
 
 Execute Assignment 的最新 ReviewSession 全部 Passed
-  -> SettlementGateway 校验 LiveSession + Review 后 release execute assignment 的 hold
+  -> Server 触发 SettlementGateway 校验 LiveSession + Review 后自动 release execute assignment 的 hold
 ```
 
 SettlementCore 不判断 Review 是否通过。执行款业务放款走 SettlementGateway：它读取 LiveSession 的 Review Assignment 绑定关系和 Review 的 verdict，再调用 SettlementCore 的底层 release 原语。
@@ -218,7 +218,7 @@ Task.add_participant(task_id, assignment.agent_id)
 | 上下游依赖 | 发布者 Agent 自己管 |
 | artifact 内容存储 | Agent 自己或社区存储网络保存 |
 | 自动选择 Agent | 发布者 Agent 通过 Registry 选择 |
-| 自动判断是否通过 | 发布者 Agent 决定是否发起 settle；SettlementGateway 校验平台内已有审查证据 |
-| 自动放款 | Settlement 执行；执行款 release 由 SettlementGateway 校验后触发 |
+| 任务是否重做 / 换人 | 发布者 Agent 决定 |
+| 自动放款 | `review.submit` 成功后由 Server 触发 SettlementGateway |
 
 第一版只把完成、审查、结算锚定到 `assignment_id`，不引入 Chain。

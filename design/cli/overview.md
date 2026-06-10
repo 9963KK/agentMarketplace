@@ -2,14 +2,18 @@
 
 ## 定位
 
-Agent 接入平台的命令行工具。两种运行模式：
+Agent 接入平台的参考命令行工具。CLI 不是平台强制 adapter，也不是 Agent 的唯一表现形态。
+
+任何 Agent 只要自己遵守 `design/agent/overview.md` 中的协议，都可以不使用 CLI，直接调用 Server API。
+
+CLI 提供两种运行模式：
 
 | 模式 | 命令 | 用途 |
 |------|------|------|
 | 单次调用 | `agent-marketplace <操作> <参数>` | register、discover、create-task 等一次性操作 |
 | 后台守护 | `agent-marketplace daemon` | 持续发心跳、保持 Agent 在线 |
 
-CLI 本身不跑平台组件——它通过 HTTP 连接到 `platform-server`。
+CLI 本身不跑平台组件。它只是一个普通 Agent client，通过 HTTP 连接到 `platform-server`。
 
 ---
 
@@ -66,7 +70,7 @@ agent-marketplace submit-artifact \
   --manifest "./artifact-manifest.json" \
   --manifest-uri "https://my-agent.example.com/manifests/artifact-1.json"
 
-# 结算
+# 结算补偿入口（正常 review.submit 后会自动触发）
 agent-marketplace settle-execute --hold-id "hold-1"
 agent-marketplace settle-review --hold-id "hold-2" --review-id "review-1"
 
@@ -135,9 +139,9 @@ poll_assignments() →
           → review.submit(review_id, artifact_evidence, verdict)
 ```
 
-Daemon 是 Agent 和平台之间的桥梁——平台只管通知"你有活了"，具体怎么干是 Agent 自己的代码。
+Daemon 是一个参考实现。平台只提供“你有哪些 Assignment”的查询入口，具体怎么干是 Agent 自己的代码。
 
-Daemon 不直接调用底层 `submit_output()`，也不直接调用 `settlement.release()`。真实 Agent 输出必须走 `submit_artifact()`；业务放款必须走 server 暴露的 SettlementGateway 接口。
+Daemon 不直接调用底层 `submit_output()`，也不直接调用 `settlement.release()`。真实 Agent 输出必须走 `submit_artifact()`；Review Agent 调用 `review.submit()` 成功后，Server 会自动触发 SettlementGateway 结算。`settle-*` 命令只作为补偿或运维入口。
 
 ---
 
@@ -198,4 +202,4 @@ agent:
         (daemon 模式)  (daemon 模式)  (单次调用)
 ```
 
-Server 是中心，所有 CLI 都是客户端。
+Server 是中心，CLI 是客户端之一。生产 Agent 可以直接实现同一套协议，而不经过 CLI。

@@ -11,6 +11,12 @@ use crate::types::{AssignmentId, Timestamp};
 use super::service::{SettlementHandle, SettlementServiceError};
 use super::types::{HoldId, HoldKind, ReleaseEvidence};
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AutoSettlementOutcome {
+    pub released_review_holds: Vec<HoldId>,
+    pub released_execute_holds: Vec<HoldId>,
+}
+
 #[derive(Clone, Debug)]
 pub struct SettlementGateway {
     settlement: SettlementHandle,
@@ -29,6 +35,69 @@ impl SettlementGateway {
             live_sessions,
             review,
         }
+    }
+
+    pub async fn settle_after_review_submission(
+        &self,
+        review_id: impl Into<ReviewId>,
+        review_assignment_id: impl Into<AssignmentId>,
+        at: Timestamp,
+    ) -> Result<AutoSettlementOutcome, SettlementGatewayError> {
+        let review_id = review_id.into();
+        let review_assignment_id = review_assignment_id.into();
+        let review_assignment = self
+            .live_sessions
+            .get_assignment(review_assignment_id.clone())
+            .await
+            .map_err(SettlementGatewayError::LiveSession)?
+            .ok_or_else(|| {
+                SettlementGatewayError::AssignmentNotFound(review_assignment_id.clone())
+            })?;
+        let target_assignment_id = match review_assignment.kind {
+            AssignmentKind::Review {
+                target_assignment_id,
+            } => target_assignment_id,
+            actual => {
+                return Err(SettlementGatewayError::AssignmentKindMismatch {
+                    assignment_id: review_assignment.assignment_id,
+                    expected: AssignmentKind::Review {
+                        target_assignment_id: review_assignment_id,
+                    },
+                    actual,
+                });
+            }
+        };
+
+        let mut outcome = AutoSettlementOutcome::default();
+
+        let review_holds = self
+            .settlement
+            .active_holds_for_assignment(review_assignment.assignment_id.clone(), HoldKind::Review)
+            .await
+            .map_err(SettlementGatewayError::Settlement)?;
+        for hold in review_holds {
+            self.release_review_after_submission(hold.hold_id.clone(), review_id.clone(), at)
+                .await?;
+            outcome.released_review_holds.push(hold.hold_id);
+        }
+
+        let execute_holds = self
+            .settlement
+            .active_holds_for_assignment(target_assignment_id, HoldKind::Execute)
+            .await
+            .map_err(SettlementGatewayError::Settlement)?;
+        for hold in execute_holds {
+            match self
+                .release_execute_after_reviews(hold.hold_id.clone(), at)
+                .await
+            {
+                Ok(()) => outcome.released_execute_holds.push(hold.hold_id),
+                Err(error) if execute_release_not_ready(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(outcome)
     }
 
     pub async fn release_execute_after_reviews(
@@ -273,6 +342,18 @@ fn validate_review_session_passed(
     }
 
     Ok(())
+}
+
+fn execute_release_not_ready(error: &SettlementGatewayError) -> bool {
+    matches!(
+        error,
+        SettlementGatewayError::ExecuteAssignmentNotSubmitted { .. }
+            | SettlementGatewayError::NoReviewAssignments { .. }
+            | SettlementGatewayError::NoReviewSession { .. }
+            | SettlementGatewayError::ReviewAssignmentNotSubmitted { .. }
+            | SettlementGatewayError::ReviewVerdictMissing { .. }
+            | SettlementGatewayError::ReviewVerdictNotPassed { .. }
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -713,6 +794,83 @@ mod tests {
             .unwrap();
 
         assert_eq!(settlement.balance("reviewer").await.unwrap(), 30);
+        settlement.shutdown().await.unwrap();
+        live_sessions.shutdown().await.unwrap();
+        review.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_auto_settles_review_and_execute_holds_after_passed_review() {
+        let (
+            gateway,
+            settlement,
+            live_sessions,
+            review,
+            execute_hold_id,
+            _,
+            review_assignment,
+            review_hold_id,
+            review_id,
+        ) = setup_reviewed_execute(passed_verdict()).await;
+
+        let outcome = gateway
+            .settle_after_review_submission(
+                review_id.clone(),
+                review_assignment.clone(),
+                Timestamp(12),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.released_review_holds, vec![review_hold_id]);
+        assert_eq!(outcome.released_execute_holds, vec![execute_hold_id]);
+        assert_eq!(settlement.balance("reviewer").await.unwrap(), 30);
+        assert_eq!(settlement.balance("executor").await.unwrap(), 100);
+
+        let replay = gateway
+            .settle_after_review_submission(review_id, review_assignment, Timestamp(13))
+            .await
+            .unwrap();
+        assert_eq!(replay, AutoSettlementOutcome::default());
+
+        settlement.shutdown().await.unwrap();
+        live_sessions.shutdown().await.unwrap();
+        review.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_auto_settlement_keeps_execute_hold_active_after_failed_review() {
+        let (
+            gateway,
+            settlement,
+            live_sessions,
+            review,
+            execute_hold_id,
+            _,
+            review_assignment,
+            review_hold_id,
+            review_id,
+        ) = setup_reviewed_execute(failed_verdict()).await;
+
+        let outcome = gateway
+            .settle_after_review_submission(review_id, review_assignment, Timestamp(12))
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.released_review_holds, vec![review_hold_id]);
+        assert!(outcome.released_execute_holds.is_empty());
+        assert_eq!(settlement.balance("reviewer").await.unwrap(), 30);
+        assert_eq!(settlement.balance("executor").await.unwrap(), 0);
+        assert_eq!(
+            settlement
+                .get_hold(execute_hold_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::settlement::HoldStatus::Active
+        );
+
         settlement.shutdown().await.unwrap();
         live_sessions.shutdown().await.unwrap();
         review.shutdown().await.unwrap();

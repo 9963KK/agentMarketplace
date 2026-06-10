@@ -76,7 +76,7 @@ struct ArtifactLocator {
 | Registry 聚合统计 | 辅助发现和排序 | 不能替代 Review / Settlement 原始记录 |
 | Agent 声誉缓存 | 提升查询性能 | 必须能从 Review / Settlement 重新计算 |
 | API 访问日志 | 运维、安全审计 | 不参与业务判定 |
-| 临时 polling cursor | CLI / SDK 拉取增量任务 | 可过期，可重建 |
+| 临时 polling cursor | Agent client 拉取增量任务 | 可过期，可重建 |
 
 May Store 数据可以放缓存、日志系统或分析库。它们不能影响 release / refund 的最终判断。
 
@@ -138,7 +138,7 @@ PlatformStore
   -> auth token
   -> idempotency
   -> artifact locator
-  -> optional snapshots / audit adapters
+  -> optional snapshots / audit exporters
 ```
 
 后续可以替换为 Postgres：

@@ -73,7 +73,7 @@ replace_executor
 replace_reviewer
 ```
 
-原因：这些操作会把平台变成任务编排器，让平台理解执行者、审查者、阶段、重做、换人和放款时机。第一版坚持：这些决策由发布者 Agent 自己做。
+原因：这些操作会把平台变成任务编排器，让平台理解执行者、审查者、阶段、重做和换人策略。第一版坚持：这些决策由发布者 Agent 自己做。
 
 发布者 Agent 应该直接按需调用原子组件：
 
@@ -85,13 +85,12 @@ LiveSession.create_session()
 LiveSession.assign()
 Settlement.hold(..., assignment_id, ...)
 Review.request(..., target_assignment_id, review_assignment_ids, ...)
+Review.submit(...)
 Review.collect_by_assignment()
-SettlementGateway.release_execute_after_reviews(execute_hold)
-SettlementGateway.release_review_after_submission(review_hold, review_id)
 Task.complete()
 ```
 
-Runtime 不替它封装成业务流程。
+Runtime 不替它封装成业务流程。`Review.submit()` 成功后的自动结算由 Server 接线到 SettlementGateway，不属于 Runtime 职责。
 
 ---
 
@@ -124,7 +123,7 @@ Heartbeat -> Runtime -> Registry
 
 Runtime 只消费 Heartbeat 事件。它不消费 Review 事件，不读取 Review verdict，不主动 release executor。
 
-执行款和 Reviewer 款 release 都由发布者 Agent 发起，但必须走 SettlementGateway 校验 LiveSession / Review 证据。Runtime 不读取 verdict，也不主动 release。
+执行款和 Reviewer 款 release 由 Server 在 `review.submit` 成功后触发 SettlementGateway 自动结算。Runtime 不读取 verdict，也不主动 release。
 
 ---
 
@@ -148,8 +147,8 @@ refund(hold-1) failed
 - 任务流程 API
 - 阶段状态机
 - 自动选择 Agent
-- 自动判定 Review 是否通过
-- 自动 release executor
+- Runtime 自动判定 Review 是否通过
+- Runtime 自动 release executor
 - 自动 deposit
 - 可靠事件 outbox
 - 分布式协调

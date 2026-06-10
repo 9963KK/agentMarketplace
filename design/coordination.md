@@ -152,7 +152,8 @@ Capability {
      │     artifact_evidence,   │
      │     verdict: Passed) ───►│  review: verdict 追加
      │                          │
-     │                          │  settlement_gateway: R1 可 release（交稿即放款）
+     │                          │  settlement_gateway: R1 自动 release（交稿即放款）
+     │                          │  settlement_gateway: B 暂不 release（等待 R2）
      │                          │
   审查者 R2                    平台
      │                          │
@@ -166,17 +167,16 @@ Capability {
      │     artifact_evidence,   │
      │     verdict: Failed) ───►│  review: verdict 追加
      │                          │
-     │                          │  settlement_gateway: R2 可 release（交稿即放款）
-     │                          │  settlement_gateway: B 不可 release（有 Failed）
+     │                          │  settlement_gateway: R2 自动 release（交稿即放款）
+     │                          │  settlement_gateway: B 保持 Active（有 Failed）
 
 
 阶段三A: Settlement — 全部 Passed
 ═══════════════════════════════════════════════════════════
 
-  发布者 A collect verdicts → 全部 Passed
+  最后一位 reviewer submit verdict → 全部 Passed
      │
-     │── settle_executor(assignment_1) ──►│  settlement_gateway.release_execute_after_reviews(
-     │                                     │    execute_hold)
+     │                                     │  settlement_gateway 自动 release execute_hold
      │                                     │  B 到账 ✅
      │
      │── task.complete(task_1) ───────────►│  任务关闭
@@ -199,8 +199,8 @@ Capability {
      │  B submit_artifact(assignment_4)
      │  R1/R2 submit verdict: Passed
      │
-     │── settle_executor(assignment_4) ──►│  settlement_gateway 校验 assignment_4 的 Review 后
-     │                                     │  B 到账 ✅
+     │                                     │  settlement_gateway 校验 assignment_4 的 Review 后
+     │                                     │  自动 release，B 到账 ✅
 
 
 阶段三C: Settlement — 有 Failed → 换人
@@ -215,8 +215,8 @@ Capability {
      │
      │  C 执行 → 审查 → Passed
      │
-     │── settle_executor(assignment_4) ──►│  settlement_gateway 校验 assignment_4 的 Review 后
-     │                                     │  C 到账 ✅
+     │                                     │  settlement_gateway 校验 assignment_4 的 Review 后
+     │                                     │  自动 release，C 到账 ✅
 
 
 阶段四: 掉线处理（随时可能发生）
@@ -247,8 +247,8 @@ Capability {
 
 | 角色 | 什么时候拿钱 | 条件 |
 |------|-------------|------|
-| Executor | 该 assignment 最新 ReviewSession 全部 Passed | 发布者调 SettlementGateway，Gateway 校验 LiveSession + Review 后 release |
-| Reviewer | 提交 verdict 即拿钱 | 发布者调 SettlementGateway，Gateway 校验 verdict 已提交，不论 Passed 还是 Failed |
+| Executor | 该 assignment 最新 ReviewSession 全部 Passed | `review.submit` 后 Server 自动触发 SettlementGateway 校验并 release |
+| Reviewer | 提交 verdict 即拿钱 | `review.submit` 后 Server 自动触发 SettlementGateway 校验并 release，不论 Passed 还是 Failed |
 | 掉线 Agent | 不拿钱 | Runtime 自动 refund |
 
 注意：Runtime 只自动 refund “掉线前尚未提交、且被成功取消”的 Assignment 对应 hold。已经 `Submitted` 的 Assignment 不会被 Runtime 覆盖，避免丢失已提交产物和审查锚点。
@@ -266,7 +266,7 @@ Capability {
 | review.submit | ❌ | ✅ | ❌ | ❌ |
 | retry_executor | ❌ | ✅ | ❌ | ❌ |
 | replace_executor | ❌ | ✅ | ❌ | ❌ |
-| settle_executor | ❌ | ❌ | ✅ | ❌ |
+| auto_settle_after_review | ❌ | ✅ | ✅ | ❌ |
 | complete_task | ❌ | ❌ | ✅ | ❌ |
 | cancel_task | ✅ | ✅ | ❌ | ❌ |
 | 查询 | ✅ | ✅ | ✅ | ✅ |

@@ -12,7 +12,7 @@ Settlement 是平台资金账本。它负责余额、托管、放款、退款和
 - 放款或退款是否已经发生
 - 资金变化的 ledger 记录是什么
 
-Settlement 不定价，不选择 Agent，不读取 Review，不判断审查是否通过。第一版只校验 release evidence 与 hold 的锚点匹配。
+SettlementCore 不定价，不选择 Agent，不读取 Review，不判断审查是否通过。它只校验 release evidence 与 hold 的锚点匹配。SettlementGateway 负责在 `review.submit` 成功后读取 LiveSession / Review，并触发自动结算。
 
 ## 设计选择
 
@@ -26,7 +26,7 @@ SettlementGateway   业务 release 前的跨组件证据校验入口
 
 `SettlementCore` 不读系统时间，不访问网络，不调用 Review / LiveSession / Task。所有时间和 release evidence 由调用方传入。
 
-`SettlementGateway` 不是任务编排器，不选择 Agent，不创建 Assignment。它只在发布者 Agent 发起结算时读取 LiveSession / Review，确认执行款或审查款满足平台证据规则，然后调用 crate 内部的 `SettlementHandle.release()`。
+`SettlementGateway` 不是任务编排器，不选择 Agent，不创建 Assignment。它在 Review verdict 记录成功后读取 LiveSession / Review，确认执行款或审查款满足平台证据规则，然后调用 crate 内部的 `SettlementHandle.release()`。手动 release 方法只作为补偿入口保留。
 
 ## 模块结构
 
@@ -93,6 +93,15 @@ pub enum HoldStatus {
 
 `from_agent` 是付款方。`agent_id` 是这笔 hold 绑定的工作承担者，也是 release 的收款方。`assignment_id` 是结算最小锚点。
 
+Server 调用 `Settlement.hold()` 前必须根据 LiveSession 校验 hold request 和真实 Assignment 完全一致：
+
+- `request.task_id == assignment.task_id`
+- `request.assignment_id == assignment.assignment_id`
+- `request.agent_id == assignment.agent_id`
+- `request.kind` 与 `assignment.kind` 匹配
+
+SettlementCore 自身还要拒绝同一个 `assignment_id + HoldKind` 下重复存在 Active hold，防止自动结算时同一工作单元被重复放款。
+
 ## ReleaseEvidence
 
 ```rust
@@ -153,6 +162,11 @@ impl SettlementCore {
     pub fn balance(&self, agent_id: &AgentId) -> Balance;
     pub fn get_hold(&self, hold_id: &HoldId) -> Option<&Hold>;
     pub fn active_holds_for_agent(&self, agent_id: &AgentId) -> Vec<Hold>;
+    pub fn active_holds_for_assignment(
+        &self,
+        assignment_id: &AssignmentId,
+        kind: HoldKind,
+    ) -> Vec<Hold>;
     pub fn ledger(&self) -> &[LedgerEntry];
 }
 ```
@@ -160,6 +174,8 @@ impl SettlementCore {
 `hold()` 会立即检查并扣减 `from_agent` 余额，避免后续 release / refund 凭空造钱。
 
 `active_holds_for_agent()` 返回和该 Agent 相关的所有 Active hold，包括 Agent 作为付款方或收款方的 hold。Runtime 掉线退款会额外过滤 `hold.agent_id == timed_out_agent`，并且只退款本次 timeout 已取消 Assignment 对应的 hold。
+
+`active_holds_for_assignment()` 用于自动结算：Gateway 根据 Review Assignment 找审查款，根据 target Execute Assignment 找执行款。查询只返回 Active hold，避免重复 release。
 
 ## SettlementGateway
 
@@ -171,6 +187,13 @@ pub struct SettlementGateway {
 }
 
 impl SettlementGateway {
+    pub async fn settle_after_review_submission(
+        &self,
+        review_id: ReviewId,
+        review_assignment_id: AssignmentId,
+        at: Timestamp,
+    ) -> Result<AutoSettlementOutcome, SettlementGatewayError>;
+
     pub async fn release_execute_after_reviews(
         &self,
         hold_id: HoldId,
@@ -185,6 +208,15 @@ impl SettlementGateway {
     ) -> Result<(), SettlementGatewayError>;
 }
 ```
+
+`settle_after_review_submission()` 是正常业务入口：
+
+- 查询 `review_assignment_id` 对应的 Review Assignment，得到 target Execute Assignment。
+- 查询该 Review Assignment 的 Active Review hold，逐个调用 `release_review_after_submission()`。
+- 查询 target Execute Assignment 的 Active Execute hold，逐个尝试 `release_execute_after_reviews()`。
+- 如果 Execute 的审查证据还不完整，或者最新 ReviewSession 存在 Failed verdict，则 Execute hold 保持 Active，不视为错误。
+- 如果没有 Active hold，返回空结果，表示没有可结算对象。
+- 如果自动结算失败，Server 不回滚已经成功记录的 verdict。第一版记录错误并依赖补偿入口；生产版应使用 outbox / settlement job 保证最终结算。
 
 `release_execute_after_reviews()` 的校验顺序：
 
@@ -221,7 +253,9 @@ hold(HoldRequest { from_agent: publisher, amount: 200, task_id: task-1, assignme
   -> hold.status = Active
   -> ledger: HoldCreated
 
-release_execute_after_reviews(hold)
+Review verdict Passed
+  -> SettlementGateway.settle_after_review_submission(review_id, review_assignment_id)
+  -> release_execute_after_reviews(hold)
   -> 检查 hold Active
   -> 检查 Execute Assignment 已提交
   -> 检查最新 ReviewSession 全部 Passed
@@ -266,6 +300,7 @@ pub enum LedgerEntryKind {
 - `amount > 0`
 - `deposit()` 只增加余额并记录 ledger
 - `hold()` 必须先扣减付款方余额，再创建 Active hold
+- 同一 `assignment_id + HoldKind` 只能有一个 Active hold
 - `release()` 只给 `hold.agent_id` 加钱
 - `refund()` 只给 `hold.from_agent` 加钱
 - `release()` 和 `refund()` 只能处理 Active hold
@@ -287,12 +322,12 @@ LiveSession.assign()
   -> Settlement.hold(HoldRequest { task_id, assignment_id, agent_id, kind, ... })
 
 Review.submit()
-  -> SettlementGateway.release_execute_after_reviews(hold_id, at)
-  -> Settlement.release(hold_id, AssignmentOutputAccepted, at)
-
-Review.submit()
-  -> SettlementGateway.release_review_after_submission(review_hold_id, review_id, at)
+  -> SettlementGateway.settle_after_review_submission(review_id, review_assignment_id, at)
+  -> Settlement.active_holds_for_assignment(review_assignment_id, Review)
   -> Settlement.release(review_hold_id, ReviewSubmitted, at)
+  -> Settlement.active_holds_for_assignment(target_assignment_id, Execute)
+  -> 如果最新 ReviewSession 全部 Passed:
+       Settlement.release(execute_hold_id, AssignmentOutputAccepted, at)
 
 Heartbeat timeout
   -> Runtime 取消该 Agent 名下 Assigned Assignment
@@ -303,6 +338,8 @@ Heartbeat timeout
 ```
 
 这样 Settlement 保持为资金原子组件，不变成任务编排器。
+
+手动 `release_execute_after_reviews()` 和 `release_review_after_submission()` 仍可保留为补偿入口，但正常业务流不依赖 Agent 手动调用。Agent 决定何时提交 verdict；平台决定 verdict 记录成功后是否满足自动结算条件。
 
 ## 错误处理
 

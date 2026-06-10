@@ -15,9 +15,11 @@
 | `balance(agent)` | 查询余额 |
 | `get_hold(hold_id)` | 查询托管详情 |
 | `active_holds_for_agent(agent)` | 查某 Agent 名下所有活跃托管 |
+| `active_holds_for_assignment(assignment_id, kind)` | 查某 Assignment 绑定的活跃托管 |
 | `ledger()` | 查询完整流水 |
-| `release_execute_after_reviews(hold_id)` | 业务放款入口：校验 Execute Assignment 最新 ReviewSession 全部 Passed 后放款 |
-| `release_review_after_submission(hold_id, review_id)` | 业务放款入口：校验 Review Assignment 已提交 verdict 后放款 |
+| `settle_after_review_submission(review_id, review_assignment_id)` | 自动结算入口：Review verdict 成功记录后触发 |
+| `release_execute_after_reviews(hold_id)` | 补偿入口：校验 Execute Assignment 最新 ReviewSession 全部 Passed 后放款 |
+| `release_review_after_submission(hold_id, review_id)` | 补偿入口：校验 Review Assignment 已提交 verdict 后放款 |
 
 ---
 
@@ -60,6 +62,16 @@ enum HoldKind {
 
 谁拿钱由 `assignment_id -> agent_id` 决定。为什么拿钱由 Assignment 的 `kind` 决定。
 
+Server 在创建 hold 前必须校验：
+
+- `assignment_id` 存在。
+- `task_id` 等于 Assignment 所属 Task。
+- `agent_id` 等于 Assignment 承担 Agent。
+- `HoldKind::Execute` 只能绑定 Execute Assignment。
+- `HoldKind::Review` 只能绑定 Review Assignment。
+
+SettlementCore 还必须作为最后防线，拒绝同一个 `assignment_id + HoldKind` 下重复创建 Active hold。Released / Refunded 是终态，之后是否允许重新 hold 由上层业务显式决定。
+
 ---
 
 ## 放款条件
@@ -72,6 +84,14 @@ enum HoldKind {
 Reviewer 交稿即放款（不管 Passed/Failed）。Executor 必须通过对应 Review 才放款。
 
 SettlementCore 不直接查 Review。业务放款走 SettlementGateway，由它读取 LiveSession / Review 后构造 release evidence。
+
+Review verdict 成功记录后，Server 必须立即调用 `SettlementGateway.settle_after_review_submission()`：
+
+- 如果存在该 Review Assignment 的 Active Review hold，立即 release 给 reviewer。
+- 如果对应 Execute Assignment 的最新 ReviewSession 已全部 Passed，立即 release Active Execute hold 给 executor。
+- 如果 ReviewSession 还缺少其他 reviewer verdict，或存在 Failed verdict，Execute hold 保持 Active。
+- 如果没有对应 hold，自动结算视为无可结算对象，不影响 verdict 已记录的事实。
+- 如果自动结算过程失败，`review.submit` 不能被回滚成“未提交”。第一版先记录错误，并保留补偿入口处理未完成结算；生产版应使用 outbox / settlement job 重试。
 
 ---
 
@@ -97,7 +117,7 @@ enum ReleaseEvidence {
 - `AssignmentOutputAccepted` 只能 release `Execute` hold
 - `ReviewSubmitted` 只能 release `Review` hold
 
-是否真的全部 Passed，由 SettlementGateway 基于平台内已有的 LiveSession / Review 记录校验。发布者 Agent 仍然负责发起 settle 时机；业务入口必须使用 gateway 对执行款放款做审查证据校验。
+是否真的全部 Passed，由 SettlementGateway 基于平台内已有的 LiveSession / Review 记录校验。发布者 Agent 负责发起任务、创建 Assignment 和请求 Review；但 verdict 成功记录后的放款触发属于平台责任，不依赖发布者 Agent 再手动调用 release。
 
 如果发布者 Agent 需要更复杂的判断策略，可以在自己的 Agent 内部实现策略模块；平台核心不引入 `SettlementPolicy`。
 
@@ -132,7 +152,8 @@ hold(HoldRequest { from_agent: publisher, amount: 200, task_id: task_1, assignme
   -> publisher.balance = 300
   -> hold Active
 
-release_execute_after_reviews(hold)
+Review verdict Passed
+  -> SettlementGateway 自动 release_execute_after_reviews(hold)
   -> B.balance += 200
   -> hold Released
 
@@ -148,7 +169,7 @@ Review Agent 的结算：
 hold(HoldRequest { from_agent: publisher, amount: 20, task_id: task_1, assignment_id: review_assignment_1, agent_id: R1, kind: Review })
 
 R1 submit verdict
-  -> release_review_after_submission(hold, review_id)
+  -> SettlementGateway 自动 release_review_after_submission(hold, review_id)
   -> R1.balance += 20
 ```
 
@@ -184,6 +205,7 @@ enum LedgerEntryKind {
 |------|------|
 | 定价 | Agent 自己谈 |
 | 分账 | 发布者自己决定 |
-| 选择 settle 时机 | 发布者 Agent |
+| 选择任务编排时机 | 发布者 Agent |
+| verdict 成功后的自动结算触发 | SettlementGateway |
 | 查 Review 记录并校验 Passed | SettlementGateway |
 | 选择 executor / reviewer | 发布者通过 Registry 选择 |

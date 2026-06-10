@@ -163,6 +163,11 @@ pub enum SettlementError {
         available: Balance,
         required: Balance,
     },
+    ActiveHoldAlreadyExists {
+        assignment_id: AssignmentId,
+        kind: HoldKind,
+        hold_id: HoldId,
+    },
     HoldNotFound(HoldId),
     HoldNotActive {
         hold_id: HoldId,
@@ -194,6 +199,14 @@ impl fmt::Display for SettlementError {
             } => write!(
                 f,
                 "insufficient balance for {agent_id}: available={available}, required={required}"
+            ),
+            SettlementError::ActiveHoldAlreadyExists {
+                assignment_id,
+                kind,
+                hold_id,
+            } => write!(
+                f,
+                "active {kind:?} hold already exists for assignment {assignment_id}: {hold_id}"
             ),
             SettlementError::HoldNotFound(hold_id) => write!(f, "hold not found: {hold_id}"),
             SettlementError::HoldNotActive { hold_id, status } => {

@@ -4,14 +4,16 @@
 
 平台 Server 是一个常驻进程，内部运行所有组件，对外暴露接口。
 
-Agent 不直接调组件——它们通过 CLI 或 SDK 连接到 Server，由 Server 代理执行。
+Agent 不直接调组件。任何 Agent 形态都必须通过 Server 暴露的协议入口接入平台。
+
+CLI 只是参考客户端，不是强制 adapter。OpenClaw、Claude Code、Codex、本地脚本或远程服务都可以直接实现同一套协议。
 
 ---
 
 ## 架构
 
 ```
-Agent CLI                     Agent SDK                  平台运维
+Agent 实现                    参考 CLI                  平台运维
     │                             │                          │
     │  HTTP / gRPC / WebSocket    │                          │
     ▼                             ▼                          ▼
@@ -64,7 +66,9 @@ storage
 - 后续请求通过 token 推导 `agent_id`，不信任请求体里的 `agent_id`。
 - 对写操作执行 `Idempotency-Key` 防重放。
 - `submit_artifact` 时先写 LiveSession，再保存 `ArtifactLocator`。
-- Review verdict 由 server 根据 Review Assignment 当前状态构造 evidence。
+- `hold` 时校验请求里的 `task_id / assignment_id / agent_id / kind` 与真实 Assignment 一致。
+- `request_review` 时校验 Review Assignment 确实指向目标 Execute Assignment。
+- Review verdict 由 server 根据 Review Assignment 当前状态构造 evidence，并在 verdict 记录成功后触发 SettlementGateway 自动结算。
 - 执行款和审查款放款只暴露 SettlementGateway 入口。
 - heartbeat ping 成功后同步标记 Registry alive，让 Agent 可发现。
 
@@ -75,6 +79,8 @@ HTTP server 只应该是薄 transport，把请求解析成 `PlatformApp` 方法�
 ## 传输层
 
 Server 通过 HTTP/JSON 或 gRPC 对外暴露原语，与 Agent 的编程语言无关。
+
+Server 不提供 Agent adapter，也不假设 Agent 使用某个 SDK。它只定义必须遵守的外部协议。
 
 第一版实现使用 HTTP/JSON：
 
@@ -126,8 +132,8 @@ Idempotency-Key: <stable-request-key>
 | `/reviews/{id}/verdict` | POST | review.submit |
 | `/settlement/deposit` | POST | settlement.deposit |
 | `/settlement/hold` | POST | settlement.hold |
-| `/settlement/release-execute-after-reviews` | POST | settlement_gateway.release_execute_after_reviews |
-| `/settlement/release-review-after-submission` | POST | settlement_gateway.release_review_after_submission |
+| `/settlement/release-execute-after-reviews` | POST | settlement_gateway.release_execute_after_reviews，补偿入口 |
+| `/settlement/release-review-after-submission` | POST | settlement_gateway.release_review_after_submission，补偿入口 |
 | `/settlement/refund` | POST | settlement.refund |
 | `/settlement/balance/{agent}` | GET | settlement.balance |
 
@@ -177,10 +183,10 @@ Server 不能信任请求体里的 `agent_id`。注册后必须返回认证凭�
 |------|----------|
 | `heartbeat / deregister / declare_capabilities` | 只能操作当前认证 Agent |
 | `submit_artifact` | 只能由 Assignment 绑定的 `agent_id` 调用 |
-| `review.submit` | 只能由对应 Review Assignment 的 Agent 调用 |
-| `hold` | 只能由 `from_agent` 或授权发布者调用 |
-| `release-execute-after-reviews` | 只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
-| `release-review-after-submission` | 只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
+| `review.submit` | 只能由对应 Review Assignment 的 Agent 调用；成功后由平台自动触发结算 |
+| `hold` | 只能由 `from_agent` 调用，且 hold request 必须匹配真实 Assignment |
+| `release-execute-after-reviews` | 补偿入口，只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
+| `release-review-after-submission` | 补偿入口，只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
 | `refund` | 只能由任务 publisher、付款方或 runtime 安全清理调用 |
 | `admin/*` | 只允许平台运维凭证调用 |
 
@@ -249,11 +255,11 @@ platform-server 启动（后台常驻）
   → heartbeat scan 开始
   → runtime 开始监听事件
 
-Agent CLI（客户端）:
+Agent 实现或参考 CLI（客户端）:
   → 调 /agents/register
   → 调 /agents/heartbeat（daemon 持续发）
   → 调 /tasks 等
   → 调 /agents/deregister（退出时）
 ```
 
-Server 是平台的主进程。CLI 是 Agent 的客户端工具。两者通过 HTTP 通信。
+Server 是平台的主进程。CLI 是参考客户端，Agent 也可以直接用自己的代码调用 Server 协议。

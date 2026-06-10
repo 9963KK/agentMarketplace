@@ -10,7 +10,7 @@ use crate::registry::{
 use crate::review::{ReviewHandle, ReviewService, ReviewSession, Verdict};
 use crate::runtime::Runtime;
 use crate::settlement::{
-    Balance, HoldRequest, SettlementGateway, SettlementHandle, SettlementService,
+    Balance, HoldKind, HoldRequest, SettlementGateway, SettlementHandle, SettlementService,
 };
 use crate::storage::{
     ArtifactLocator, AuthCredential, IdempotencyDecision, IdempotencyKey, IdempotencyOutcome,
@@ -456,6 +456,7 @@ impl PlatformApp {
         let caller = self.authenticate(token).await?;
         self.require_publisher(&request.task_id, &caller, "request review")
             .await?;
+        self.validate_review_request(&request).await?;
         match self
             .begin_idempotency(
                 caller.clone(),
@@ -521,15 +522,24 @@ impl PlatformApp {
             )
             .await?
         {
-            IdempotencyDecision::Replay(record) => replay_unit(record.outcome),
+            IdempotencyDecision::Replay(record) => {
+                replay_unit(record.outcome)?;
+                self.settle_after_review_submission_best_effort(
+                    review_id.clone(),
+                    review_assignment_id.clone(),
+                    at,
+                )
+                .await;
+                Ok(())
+            }
             IdempotencyDecision::Started(_) => {
                 let evidence = crate::review::ReviewArtifactEvidence::new(
-                    assignment.assignment_id,
+                    assignment.assignment_id.clone(),
                     assignment.status,
                     assignment.output_hash,
                 );
                 self.review
-                    .submit(review_id, evidence, verdict, at)
+                    .submit(review_id.clone(), evidence, verdict, at)
                     .await
                     .map_err(|error| ServerError::component("review", error))?;
                 self.finish_idempotency(
@@ -540,6 +550,12 @@ impl PlatformApp {
                     at,
                 )
                 .await?;
+                self.settle_after_review_submission_best_effort(
+                    review_id,
+                    review_assignment_id,
+                    at,
+                )
+                .await;
                 Ok(())
             }
         }
@@ -605,6 +621,7 @@ impl PlatformApp {
                 action: "hold funds for another payer",
             });
         }
+        self.validate_hold_request(&request).await?;
         match self
             .begin_idempotency(
                 request.from_agent.clone(),
@@ -780,6 +797,101 @@ impl PlatformApp {
             .map_err(|error| ServerError::component("task", error))?
             .ok_or_else(|| ServerError::NotFound(format!("task {task_id}")))?;
         require_task_publisher(&task.publisher, caller, action)
+    }
+
+    async fn validate_hold_request(&self, request: &HoldRequest) -> Result<(), ServerError> {
+        let assignment = self.get_assignment(request.assignment_id.clone()).await?;
+        if assignment.task_id != request.task_id {
+            return Err(ServerError::BadRequest(format!(
+                "hold task {} does not match assignment {} task {}",
+                request.task_id, request.assignment_id, assignment.task_id
+            )));
+        }
+        if assignment.agent_id != request.agent_id {
+            return Err(ServerError::BadRequest(format!(
+                "hold payee {} does not match assignment {} agent {}",
+                request.agent_id, request.assignment_id, assignment.agent_id
+            )));
+        }
+        let kind_matches = matches!(
+            (&request.kind, &assignment.kind),
+            (HoldKind::Execute, AssignmentKind::Execute)
+                | (HoldKind::Review, AssignmentKind::Review { .. })
+        );
+        if !kind_matches {
+            return Err(ServerError::BadRequest(format!(
+                "hold kind {:?} does not match assignment {} kind {:?}",
+                request.kind, request.assignment_id, assignment.kind
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn validate_review_request(&self, request: &ReviewRequest) -> Result<(), ServerError> {
+        let target = self
+            .get_assignment(request.target_assignment_id.clone())
+            .await?;
+        if target.task_id != request.task_id {
+            return Err(ServerError::BadRequest(format!(
+                "review target assignment {} belongs to task {}, not {}",
+                request.target_assignment_id, target.task_id, request.task_id
+            )));
+        }
+        if !matches!(&target.kind, AssignmentKind::Execute) {
+            return Err(ServerError::InvalidAssignmentKind {
+                assignment_id: target.assignment_id,
+                expected: "execute",
+                actual: target.kind.clone(),
+            });
+        }
+
+        for review_assignment_id in &request.review_assignment_ids {
+            let review_assignment = self.get_assignment(review_assignment_id.clone()).await?;
+            if review_assignment.task_id != request.task_id {
+                return Err(ServerError::BadRequest(format!(
+                    "review assignment {review_assignment_id} belongs to task {}, not {}",
+                    review_assignment.task_id, request.task_id
+                )));
+            }
+            match &review_assignment.kind {
+                AssignmentKind::Review {
+                    target_assignment_id,
+                } if target_assignment_id == &request.target_assignment_id => {}
+                AssignmentKind::Review {
+                    target_assignment_id,
+                } => {
+                    return Err(ServerError::BadRequest(format!(
+                        "review assignment {review_assignment_id} targets {target_assignment_id}, not {}",
+                        request.target_assignment_id
+                    )));
+                }
+                actual => {
+                    return Err(ServerError::InvalidAssignmentKind {
+                        assignment_id: review_assignment.assignment_id,
+                        expected: "review",
+                        actual: actual.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn settle_after_review_submission_best_effort(
+        &self,
+        review_id: crate::review::ReviewId,
+        review_assignment_id: AssignmentId,
+        at: Timestamp,
+    ) {
+        if let Err(error) = self
+            .settlement_gateway
+            .settle_after_review_submission(review_id, review_assignment_id, at)
+            .await
+        {
+            eprintln!("failed to auto-settle after review submission: {error}");
+        }
     }
 
     async fn require_hold_payer_or_publisher(
@@ -1046,7 +1158,7 @@ mod tests {
             .await
             .unwrap()
             .assignment_id;
-        let execute_hold = app
+        let _execute_hold = app
             .hold(
                 &publisher_token,
                 key("hold-execute"),
@@ -1135,7 +1247,7 @@ mod tests {
             .await
             .unwrap()
             .assignment_id;
-        let review_hold = app
+        let _review_hold = app
             .hold(
                 &publisher_token,
                 key("hold-review"),
@@ -1186,27 +1298,10 @@ mod tests {
         app.submit_review(
             &reviewer_token,
             key("submit-review"),
-            review_id.clone(),
+            review_id,
             review_assignment.clone(),
             passed_verdict(),
             Timestamp(18),
-        )
-        .await
-        .unwrap();
-        app.release_review_after_submission(
-            &publisher_token,
-            key("release-review"),
-            review_hold,
-            review_id,
-            Timestamp(19),
-        )
-        .await
-        .unwrap();
-        app.release_execute_after_reviews(
-            &publisher_token,
-            key("release-execute"),
-            execute_hold,
-            Timestamp(20),
         )
         .await
         .unwrap();
@@ -1214,6 +1309,156 @@ mod tests {
         assert_eq!(app.balance(&publisher_token).await.unwrap(), 0);
         assert_eq!(app.balance(&executor_token).await.unwrap(), 100);
         assert_eq!(app.balance(&reviewer_token).await.unwrap(), 30);
+
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hold_rejects_assignment_binding_mismatch() {
+        let app = PlatformApp::spawn().unwrap();
+        let publisher_token = register(&app, "publisher", 1).await;
+        let _executor_token = register(&app, "executor", 2).await;
+        let _other_token = register(&app, "other", 3).await;
+
+        app.deposit(&publisher_token, key("deposit"), 100, Timestamp(4))
+            .await
+            .unwrap();
+        let task_id = app
+            .create_task(&publisher_token, key("task"), Timestamp(5))
+            .await
+            .unwrap();
+        let session_id = app
+            .create_session(
+                &publisher_token,
+                key("session"),
+                task_id.clone(),
+                Timestamp(6),
+            )
+            .await
+            .unwrap()
+            .session_id;
+        let assignment_id = app
+            .assign(
+                &publisher_token,
+                key("assign"),
+                AssignRequest::new(
+                    task_id.clone(),
+                    session_id,
+                    AgentId::from("executor"),
+                    AssignmentKind::Execute,
+                ),
+                Timestamp(7),
+            )
+            .await
+            .unwrap()
+            .assignment_id;
+
+        let error = app
+            .hold(
+                &publisher_token,
+                key("bad-hold"),
+                HoldRequest::new(
+                    AgentId::from("publisher"),
+                    100,
+                    task_id,
+                    assignment_id,
+                    AgentId::from("other"),
+                    HoldKind::Execute,
+                ),
+                Timestamp(8),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ServerError::BadRequest(message) if message.contains("payee")));
+        assert_eq!(app.balance(&publisher_token).await.unwrap(), 100);
+
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn request_review_rejects_review_assignment_for_different_target() {
+        let app = PlatformApp::spawn().unwrap();
+        let publisher_token = register(&app, "publisher", 1).await;
+
+        let task_id = app
+            .create_task(&publisher_token, key("task"), Timestamp(2))
+            .await
+            .unwrap();
+        let session_id = app
+            .create_session(
+                &publisher_token,
+                key("session"),
+                task_id.clone(),
+                Timestamp(3),
+            )
+            .await
+            .unwrap()
+            .session_id;
+        let first_execute = app
+            .assign(
+                &publisher_token,
+                key("assign-execute-1"),
+                AssignRequest::new(
+                    task_id.clone(),
+                    session_id.clone(),
+                    AgentId::from("executor-1"),
+                    AssignmentKind::Execute,
+                ),
+                Timestamp(4),
+            )
+            .await
+            .unwrap()
+            .assignment_id;
+        let second_execute = app
+            .assign(
+                &publisher_token,
+                key("assign-execute-2"),
+                AssignRequest::new(
+                    task_id.clone(),
+                    session_id.clone(),
+                    AgentId::from("executor-2"),
+                    AssignmentKind::Execute,
+                ),
+                Timestamp(5),
+            )
+            .await
+            .unwrap()
+            .assignment_id;
+        let review_assignment = app
+            .assign(
+                &publisher_token,
+                key("assign-review"),
+                AssignRequest::new(
+                    task_id.clone(),
+                    session_id,
+                    AgentId::from("reviewer"),
+                    AssignmentKind::Review {
+                        target_assignment_id: second_execute,
+                    },
+                ),
+                Timestamp(6),
+            )
+            .await
+            .unwrap()
+            .assignment_id;
+
+        let error = app
+            .request_review(
+                &publisher_token,
+                key("bad-review"),
+                ReviewRequest::new(
+                    task_id,
+                    first_execute,
+                    vec![review_assignment],
+                    ReviewCriteria::plain_text("review wrong target"),
+                ),
+                Timestamp(7),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ServerError::BadRequest(message) if message.contains("targets")));
 
         app.shutdown().await;
     }

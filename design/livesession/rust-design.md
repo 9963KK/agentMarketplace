@@ -262,7 +262,7 @@ Review.request(..., target_assignment_id, review_assignment_ids, ...)
 ```
 
 Review 用 `target_assignment_id` 和 `review_assignment_id` 记录 verdict。
-SettlementGateway 用 `review_assignments_for_target()` 确认 Execute Assignment 已挂载 Review Assignment，再结合 Review verdict 判断是否允许执行款 release。
+`review.submit` 成功后，Server 调用 SettlementGateway。SettlementGateway 用 `review_assignments_for_target()` 确认 Execute Assignment 已挂载 Review Assignment，再结合 Review verdict 判断是否允许执行款 release。
 
 Settlement 用 `assignment_id` 和 `agent_id` 绑定托管资金。
 
@@ -382,7 +382,7 @@ pub enum LiveSessionCommand {
 - artifact 内容存储
 - 自动选择 Agent
 - 自动创建 Review
-- 自动放款
+- LiveSession 自动放款
 - 分布式持久化
 
 第一版只把执行、审查、结算锚定到 `assignment_id`。

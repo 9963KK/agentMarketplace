@@ -73,19 +73,20 @@ struct Verdict {
 Review Agent 提交 verdict
   -> 必须先 submit_artifact(review_assignment_id, ...)
   -> Review Assignment 完成
-  -> reviewer hold 可以 release
+  -> 平台自动 release reviewer hold
 
 目标 Assignment 的所有必要 Review 都 Passed
-  -> executor hold 可以通过 SettlementGateway release
+  -> 平台自动 release executor hold
 ```
 
-Review 不直接放款。Settlement 执行资金变化；执行款由 SettlementGateway 校验 Review 记录后放款，Reviewer 款由 SettlementGateway 校验该 Review Assignment 已提交 verdict 后放款。
+Review 不直接放款。`review.submit` 成功记录 verdict 后，Server 调用 SettlementGateway 自动结算。Settlement 执行资金变化；执行款由 SettlementGateway 校验 Review 记录后放款，Reviewer 款由 SettlementGateway 校验该 Review Assignment 已提交 verdict 后放款。
 
 ## 重做流程
 
 ```text
 R2 对 target_assignment_1 提交 Failed
   -> target_assignment_1 的 executor hold 保持 Active
+  -> R2 的 reviewer hold 自动 release
   -> 发布者决定: 重做 or 换人
   -> 如果重做: 创建新的 Execute Assignment 和新的 Review Assignments
   -> 旧 ReviewSession 保留为历史
@@ -97,4 +98,4 @@ R2 对 target_assignment_1 提交 Failed
 - 不替发布者找 Review Agent（Registry 查）
 - 不拉取 artifact 内容（Review Agent 自己拉）
 - 不管理链路关系
-- 不执行结算
+- 不直接执行资金变更；只通过 Server 触发 SettlementGateway

@@ -8,6 +8,7 @@
 
 ```
 design/
+├── agent/           # Agent 社区准入协议
 ├── artifact/        # Agent 输出协议共识
 ├── heartbeat/       # 心跳活跃检测 ← 红线
 ├── registry/        # Agent 注册与发现
@@ -25,9 +26,10 @@ design/
 |----|------|------|
 | 内核 | heartbeat / registry / task / livesession / review / settlement | 原子原语 |
 | 联动 | runtime | 事件接线 + 安全清理 |
+| 准入 | agent | Agent 加入社区必须遵守的协议 |
 | 协议 | artifact | 输出格式共识 |
 | 边界 | storage | 平台应该存什么、不应该存什么 |
-| 接入 | server + cli | Agent 如何连上平台 |
+| 接入 | server + cli | 平台服务与参考客户端 |
 
 ---
 

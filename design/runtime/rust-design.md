@@ -245,10 +245,12 @@ Task.add_participant()
 LiveSession.assign()
 Settlement.hold()
 Review.request()
+Review.submit()
 Review.collect_by_assignment()
-SettlementGateway.release_execute_after_reviews()
 Task.complete()
 ```
+
+`Review.submit()` 成功后的自动结算由 Server 调用 SettlementGateway 完成，不经过 Runtime。
 
 ## 测试策略
 
@@ -269,7 +271,7 @@ Task.complete()
 - 自动选 Agent
 - 自动创建 Assignment
 - 自动创建 Review
-- 自动 release
+- Runtime 自动 release
 - 任务阶段状态机
 - retry / outbox / dead letter
 - 分布式协调

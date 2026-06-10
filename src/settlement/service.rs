@@ -8,7 +8,7 @@ use crate::types::Timestamp;
 
 use super::SettlementCore;
 use super::types::{
-    Balance, Hold, HoldId, HoldRequest, LedgerEntry, ReleaseEvidence, SettlementError,
+    Balance, Hold, HoldId, HoldKind, HoldRequest, LedgerEntry, ReleaseEvidence, SettlementError,
 };
 
 const DEFAULT_COMMAND_BUFFER: usize = 128;
@@ -47,6 +47,11 @@ pub enum SettlementCommand {
     },
     ActiveHoldsForAgent {
         agent_id: AgentId,
+        reply: oneshot::Sender<Vec<Hold>>,
+    },
+    ActiveHoldsForAssignment {
+        assignment_id: crate::types::AssignmentId,
+        kind: HoldKind,
         reply: oneshot::Sender<Vec<Hold>>,
     },
     Ledger {
@@ -172,6 +177,23 @@ impl SettlementHandle {
         let (reply, response) = oneshot::channel();
         self.send(SettlementCommand::ActiveHoldsForAgent {
             agent_id: agent_id.into(),
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| SettlementServiceError::ResponseDropped)
+    }
+
+    pub async fn active_holds_for_assignment(
+        &self,
+        assignment_id: impl Into<crate::types::AssignmentId>,
+        kind: HoldKind,
+    ) -> Result<Vec<Hold>, SettlementServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(SettlementCommand::ActiveHoldsForAssignment {
+            assignment_id: assignment_id.into(),
+            kind,
             reply,
         })
         .await?;
@@ -306,6 +328,14 @@ impl SettlementService {
                 let _ = reply.send(self.core.active_holds_for_agent(&agent_id));
                 None
             }
+            SettlementCommand::ActiveHoldsForAssignment {
+                assignment_id,
+                kind,
+                reply,
+            } => {
+                let _ = reply.send(self.core.active_holds_for_assignment(&assignment_id, kind));
+                None
+            }
             SettlementCommand::Ledger { reply } => {
                 let _ = reply.send(self.core.ledger().to_vec());
                 None
@@ -393,6 +423,73 @@ mod tests {
             })
         );
         assert_eq!(settlement.balance("publisher").await.unwrap(), 99);
+
+        settlement.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_lists_active_holds_for_assignment_by_kind() {
+        let settlement = SettlementService::spawn();
+        settlement
+            .deposit("publisher", 130, Timestamp(0))
+            .await
+            .unwrap();
+
+        let execute_hold = settlement
+            .hold(hold_request(100), Timestamp(1))
+            .await
+            .unwrap();
+        let review_hold = settlement
+            .hold(
+                HoldRequest::new(
+                    "publisher",
+                    30,
+                    TaskId::from("task-1"),
+                    AssignmentId::from("review-1"),
+                    "reviewer",
+                    HoldKind::Review,
+                ),
+                Timestamp(2),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            settlement
+                .active_holds_for_assignment("execute-1", HoldKind::Execute)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|hold| hold.hold_id)
+                .collect::<Vec<_>>(),
+            vec![execute_hold]
+        );
+        assert_eq!(
+            settlement
+                .active_holds_for_assignment("execute-1", HoldKind::Review)
+                .await
+                .unwrap(),
+            Vec::<Hold>::new()
+        );
+        assert_eq!(
+            settlement
+                .active_holds_for_assignment("review-1", HoldKind::Review)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|hold| hold.hold_id)
+                .collect::<Vec<_>>(),
+            vec![review_hold.clone()]
+        );
+
+        settlement.refund(review_hold, Timestamp(3)).await.unwrap();
+        assert_eq!(
+            settlement
+                .active_holds_for_assignment("review-1", HoldKind::Review)
+                .await
+                .unwrap(),
+            Vec::<Hold>::new()
+        );
 
         settlement.shutdown().await.unwrap();
     }
