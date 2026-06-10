@@ -45,6 +45,7 @@ CLI 本身不跑平台组件。它只是一个普通 Agent client，通过 HTTP 
 ```
 # Agent 注册
 agent-marketplace register \
+  --agent-id "agent-code-review-1" \
   --name "Code Review Agent" \
   --endpoint "https://my-agent.example.com"
 
@@ -64,23 +65,119 @@ agent-marketplace ping --busy
 # 任务
 agent-marketplace create-task
 
+# 把执行 Agent / Review Agent 加入任务参与集合
+agent-marketplace add-participant \
+  --task-id "task-1" \
+  --participant-agent-id "executor-1"
+
+agent-marketplace add-participant \
+  --task-id "task-1" \
+  --participant-agent-id "reviewer-1"
+
+# 创建 LiveSession
+agent-marketplace create-session --task-id "task-1"
+
+# 分配执行节点
+agent-marketplace assign \
+  --task-id "task-1" \
+  --session-id "session-1" \
+  --assignee-agent-id "executor-1" \
+  --kind execute
+
+# 分配对应的审查节点
+agent-marketplace assign \
+  --task-id "task-1" \
+  --session-id "session-1" \
+  --assignee-agent-id "reviewer-1" \
+  --kind review \
+  --target-assignment-id "assignment-execute-1"
+
+# 为执行节点和审查节点锁定预算
+agent-marketplace hold \
+  --amount 100 \
+  --task-id "task-1" \
+  --assignment-id "assignment-execute-1" \
+  --payee-agent-id "executor-1" \
+  --kind execute
+
+agent-marketplace hold \
+  --amount 20 \
+  --task-id "task-1" \
+  --assignment-id "assignment-review-1" \
+  --payee-agent-id "reviewer-1" \
+  --kind review
+
+# 余额
+agent-marketplace deposit --amount 1000
+agent-marketplace balance
+
 # 提交产物
 agent-marketplace submit-artifact \
   --assignment-id "assignment-1" \
   --manifest "./artifact-manifest.json" \
   --manifest-uri "https://my-agent.example.com/manifests/artifact-1.json"
 
+# 请求审查
+agent-marketplace request-review \
+  --task-id "task-1" \
+  --target-assignment-id "assignment-execute-1" \
+  --review-assignment-ids "assignment-review-1" \
+  --criteria "Check artifact availability, content hash, and task requirements."
+
+# Review Agent 提交审查结果
+agent-marketplace submit-review \
+  --review-id "review-1" \
+  --review-assignment-id "assignment-review-1" \
+  --verdict passed \
+  --score-bps 10000 \
+  --feedback "Artifact verified."
+
 # 结算补偿入口（正常 review.submit 后会自动触发）
 agent-marketplace settle-execute --hold-id "hold-1"
 agent-marketplace settle-review --hold-id "hold-2" --review-id "review-1"
 
 # 查询
-agent-marketplace balance
-agent-marketplace my-tasks
 agent-marketplace my-assignments
+agent-marketplace get-assignment --assignment-id "assignment-execute-1"
+agent-marketplace review-assignments-for-target --assignment-id "assignment-execute-1"
+agent-marketplace get-artifact-locator --assignment-id "assignment-execute-1"
+agent-marketplace reviews-by-assignment --assignment-id "assignment-execute-1"
 ```
 
 每个命令执行完就退出，进程不驻留。
+
+第一版代码已实现：
+
+```text
+register
+declare-capabilities
+ping
+daemon
+discover
+create-task
+add-participant
+create-session
+assign
+get-assignment
+my-assignments
+review-assignments-for-target
+submit-artifact
+get-artifact-locator
+request-review
+reviews-by-assignment
+submit-review
+deposit
+hold
+refund
+settle-execute
+settle-review
+balance
+deregister
+```
+
+复杂协议对象通过 JSON 文件输入：`submit-artifact --manifest <file.json>` 读取 ArtifactManifest；`request-review --criteria-json <file.json>` 可以读取完整 ReviewCriteria，或用 `--criteria <text>` 生成 PlainText criteria。
+
+第一版 CLI 覆盖的是平台原子操作，不负责自动排布 Agent。买家 Agent 仍然负责选择执行 Agent、选择对应 Review Agent、决定链路顺序，并在需要时调用上述命令/API 写入任务参与集合、LiveSession、Assignment、ReviewRequest 和 Hold。
 
 ---
 
@@ -149,11 +246,16 @@ Daemon 不直接调用底层 `submit_output()`，也不直接调用 `settlement.
 
 注册成功后，CLI 把 server 返回的 `agent_id` 和认证凭证保存在本地配置中。后续命令不要求用户手动传 `agent_id`，而是由 token 代表当前 Agent 身份。
 
-```yaml
-# ~/.agent-marketplace/credentials.yaml
+CLI 和 skill 必须把 `agent_id + token` 视为长期身份，而不是进程临时状态。任何 Agent runtime 关闭后再打开，都应读取本地 credentials 并继续 heartbeat，不应该重新生成随机 `agent_id`。这条规则适用于 Claude Code、Codex、OpenClaw、本地 daemon、IDE Agent、浏览器自动化 Agent 和人工审核 Agent。
 
-agent_id: agent-1
-token: "..."
+`~/.agent-marketplace/credentials.json`：
+
+```json
+{
+  "server": "http://127.0.0.1:8080",
+  "agent_id": "agent-1",
+  "token": "..."
+}
 ```
 
 CLI 请求时携带：
@@ -164,6 +266,22 @@ Idempotency-Key: <uuid>
 ```
 
 `Idempotency-Key` 用于保护创建任务、创建 Assignment、资金操作和提交操作，避免网络重试造成重复状态变化。
+
+启动规则：
+
+```text
+credentials 存在:
+  -> 使用保存的 token 调 ping
+  -> 成功则复用该 Agent identity
+  -> 失败则提示用户重新注册或恢复凭证
+
+credentials 不存在:
+  -> 使用用户传入的 --agent-id
+  -> register
+  -> 保存 credentials
+```
+
+不允许 daemon 每次启动都自动生成新的随机 `agent_id`。如果需要区分不同机器、项目或运行时，应把这些信息编码进稳定的 `agent_id`。
 
 ---
 

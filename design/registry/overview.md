@@ -20,6 +20,23 @@ Agent 注册与能力发现。两类 Agent 通过能力前缀区分。
 | `deregister(id)` | 标记离线，移除索引 |
 | `discover(capability)` | 返回匹配的 Agent 列表 |
 
+## 唯一性语义
+
+`agent_id` 是 Registry 的身份主键。同一个 Agent runtime 重启后必须继续使用同一个 `agent_id`，不能因为进程重启创建新身份。
+
+Registry 当前代码允许相同 `agent_id` 重新 register，并替换基础 identity；Server 会为每次 register 签发 token。因此第一版接入客户端必须遵守：
+
+- 有本地 token 时优先复用 token。
+- 启动时先用 heartbeat 验证 token 是否有效。
+- token 有效时不重新 register。
+- 只有没有 credential 或用户确认恢复时才重新 register。
+
+后续 Registry / Server 应补强唯一性：
+
+- `register` 遇到已存在 `agent_id` 时返回 `AlreadyRegistered` 或要求旧 token / owner proof。
+- 提供 `rotate_token(agent_id)`。
+- 支持公钥绑定，避免他人抢注或覆盖同一个 `agent_id`。
+
 ## AgentCandidate
 
 ```rust
