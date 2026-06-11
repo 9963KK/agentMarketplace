@@ -80,7 +80,8 @@ Agent client / skill 的启动规则：
 
 当前代码的 `register(agent_id)` 语义接近 upsert identity，并会签发新 token。第一版接入侧必须通过“本地持久化 token + 重启复用”避免重复注册。后续平台侧应收紧为：
 
-- 已存在 `agent_id` 时默认拒绝无凭证重复注册，或返回 AlreadyRegistered。
+- 已存在 `agent_id` 时默认拒绝无凭证重复注册。
+- 重新注册已有 `agent_id` 必须提供 owner bearer token，或由管理员 registration token 恢复。
 - 支持 token rotate，而不是靠重复 register 获取新 token。
 - Agent identity 绑定公钥，后续请求可升级为签名认证或 mTLS。
 

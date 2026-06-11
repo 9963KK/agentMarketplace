@@ -23,6 +23,7 @@ use super::types::{AgentToken, AssignRequest, ServerError, SubmittedArtifact};
 
 const AUTHORIZATION: &str = "authorization";
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
+const REGISTRATION_TOKEN: &str = "registration-token";
 
 pub fn router(app: PlatformApp) -> Router {
     Router::new()
@@ -83,13 +84,23 @@ async fn health() -> Json<HealthResponse> {
 
 async fn register_agent(
     State(app): State<PlatformApp>,
+    headers: HeaderMap,
     Json(request): Json<RegisterAgentRequest>,
 ) -> Result<Json<super::types::RegisterAgentResponse>, HttpError> {
     let mut identity = AgentIdentity::new(request.agent_id);
     identity.name = request.name;
     identity.endpoint = request.endpoint;
     identity.metadata = request.metadata;
-    Ok(Json(app.register_agent(identity, now()).await?))
+    let owner_token = optional_auth_token(&headers);
+    Ok(Json(
+        app.register_agent_with_proof(
+            identity,
+            now(),
+            owner_token.as_ref(),
+            registration_token(&headers),
+        )
+        .await?,
+    ))
 }
 
 async fn declare_capabilities(
@@ -411,11 +422,25 @@ fn auth_token(headers: &HeaderMap) -> Result<AgentToken, HttpError> {
     Ok(AgentToken::from(token.to_string()))
 }
 
+fn optional_auth_token(headers: &HeaderMap) -> Option<AgentToken> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| AgentToken::from(token.to_string()))
+}
+
+fn registration_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(REGISTRATION_TOKEN)
+        .and_then(|value| value.to_str().ok())
+}
+
 fn idempotency_key(headers: &HeaderMap) -> Result<IdempotencyKey, HttpError> {
     let value = headers
         .get(IDEMPOTENCY_KEY)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| ServerError::component("http", "missing Idempotency-Key header"))?;
+        .ok_or_else(|| ServerError::BadRequest("missing Idempotency-Key header".to_string()))?;
     Ok(IdempotencyKey::from(value.to_string()))
 }
 

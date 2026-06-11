@@ -8,6 +8,8 @@ use super::types::{
     IdempotencyRecord, IdempotentOperation, StorageError, StoreOutcome, TokenHash,
 };
 
+const DEFAULT_PENDING_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
 #[derive(Debug, Default)]
 pub struct StorageCore {
     credentials_by_token: HashMap<TokenHash, AuthCredential>,
@@ -94,6 +96,19 @@ impl StorageCore {
                     existing_operation: existing.operation,
                     attempted_operation: operation,
                 });
+            }
+            if existing.outcome == IdempotencyOutcome::Pending
+                && pending_expired(
+                    &key,
+                    &caller_agent_id,
+                    existing.updated_at,
+                    at,
+                    DEFAULT_PENDING_TIMEOUT_MS,
+                )?
+            {
+                let record = IdempotencyRecord::new(key, caller_agent_id, operation, at);
+                self.idempotency.insert(index, record.clone());
+                return Ok(IdempotencyDecision::Started(record));
             }
             return Ok(IdempotencyDecision::Replay(existing.clone()));
         }
@@ -182,6 +197,25 @@ impl StorageCore {
     pub fn artifact_locator(&self, assignment_id: &AssignmentId) -> Option<&ArtifactLocator> {
         self.artifact_locators.get(assignment_id)
     }
+}
+
+fn pending_expired(
+    key: &IdempotencyKey,
+    caller_agent_id: &AgentId,
+    updated_at: Timestamp,
+    attempted_at: Timestamp,
+    timeout_ms: u64,
+) -> Result<bool, StorageError> {
+    if attempted_at < updated_at {
+        return Err(StorageError::IdempotencyTimestampWentBackwards {
+            key: key.clone(),
+            caller_agent_id: caller_agent_id.clone(),
+            current: updated_at,
+            attempted: attempted_at,
+        });
+    }
+
+    Ok(attempted_at.0.saturating_sub(updated_at.0) >= timeout_ms)
 }
 
 #[cfg(test)]
@@ -285,6 +319,86 @@ mod tests {
                 caller_agent_id: caller,
                 existing_operation: IdempotentOperation::CreateTask,
                 attempted_operation: IdempotentOperation::Hold,
+            }
+        );
+    }
+
+    #[test]
+    fn expired_pending_idempotency_can_be_restarted() {
+        let mut core = StorageCore::new();
+        let caller = agent("agent-1");
+        let key = key("request-1");
+
+        assert!(matches!(
+            core.begin_idempotency(
+                caller.clone(),
+                key.clone(),
+                IdempotentOperation::CreateTask,
+                Timestamp(1_000),
+            )
+            .unwrap(),
+            IdempotencyDecision::Started(_)
+        ));
+        assert!(matches!(
+            core.begin_idempotency(
+                caller.clone(),
+                key.clone(),
+                IdempotentOperation::CreateTask,
+                Timestamp(1_000 + DEFAULT_PENDING_TIMEOUT_MS - 1),
+            )
+            .unwrap(),
+            IdempotencyDecision::Replay(_)
+        ));
+
+        let restarted = core
+            .begin_idempotency(
+                caller.clone(),
+                key.clone(),
+                IdempotentOperation::CreateTask,
+                Timestamp(1_000 + DEFAULT_PENDING_TIMEOUT_MS),
+            )
+            .unwrap();
+
+        let IdempotencyDecision::Started(record) = restarted else {
+            panic!("expired pending idempotency should restart");
+        };
+        assert_eq!(
+            record.created_at,
+            Timestamp(1_000 + DEFAULT_PENDING_TIMEOUT_MS)
+        );
+        assert_eq!(
+            core.idempotency_record(&caller, &key).unwrap().created_at,
+            Timestamp(1_000 + DEFAULT_PENDING_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn pending_idempotency_rejects_backwards_timestamp() {
+        let mut core = StorageCore::new();
+        let caller = agent("agent-1");
+        let key = key("request-1");
+
+        core.begin_idempotency(
+            caller.clone(),
+            key.clone(),
+            IdempotentOperation::CreateTask,
+            Timestamp(10),
+        )
+        .unwrap();
+
+        assert_eq!(
+            core.begin_idempotency(
+                caller.clone(),
+                key.clone(),
+                IdempotentOperation::CreateTask,
+                Timestamp(9),
+            )
+            .unwrap_err(),
+            StorageError::IdempotencyTimestampWentBackwards {
+                key,
+                caller_agent_id: caller,
+                current: Timestamp(10),
+                attempted: Timestamp(9),
             }
         );
     }

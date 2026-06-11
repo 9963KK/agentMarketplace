@@ -34,6 +34,7 @@ fn run(args: Vec<String>) -> Result<(), CliError> {
     let global_server = parser.take_option("--server");
     let global_token = parser.take_option("--token");
     let global_agent_id = parser.take_option("--agent-id");
+    let global_registration_token = parser.take_option("--registration-token");
     let command = parser.command()?;
     if command == "help" || command == "--help" || command == "-h" {
         print_help();
@@ -50,6 +51,8 @@ fn run(args: Vec<String>) -> Result<(), CliError> {
     let agent_id = global_agent_id
         .or_else(|| env::var("AGENT_MARKETPLACE_AGENT_ID").ok())
         .or_else(|| credentials.agent_id.clone());
+    let registration_token =
+        global_registration_token.or_else(|| env::var("AGENT_MARKETPLACE_REGISTRATION_TOKEN").ok());
     let client = HttpClient::new(server.clone())?;
 
     match command.as_str() {
@@ -62,10 +65,11 @@ fn run(args: Vec<String>) -> Result<(), CliError> {
             let metadata = parser.take_kv_options("--metadata")?;
             parser.finish()?;
 
-            let response = client.post_json(
+            let response = client.post_json_with_registration_token(
                 "/agents/register",
+                token.as_deref(),
                 None,
-                None,
+                registration_token.as_deref(),
                 &json!({
                     "agent_id": agent_id,
                     "name": name,
@@ -630,7 +634,7 @@ impl HttpClient {
     }
 
     fn get(&self, path: &str, token: Option<&str>) -> Result<Value, CliError> {
-        self.request("GET", path, token, None, None)
+        self.request("GET", path, token, None, None, None)
     }
 
     fn post_empty(
@@ -639,7 +643,7 @@ impl HttpClient {
         token: Option<&str>,
         idempotency_key: Option<&str>,
     ) -> Result<Value, CliError> {
-        self.request("POST", path, token, idempotency_key, None)
+        self.request("POST", path, token, idempotency_key, None, None)
     }
 
     fn post_json(
@@ -649,7 +653,25 @@ impl HttpClient {
         idempotency_key: Option<&str>,
         body: &Value,
     ) -> Result<Value, CliError> {
-        self.request("POST", path, token, idempotency_key, Some(body))
+        self.request("POST", path, token, idempotency_key, None, Some(body))
+    }
+
+    fn post_json_with_registration_token(
+        &self,
+        path: &str,
+        token: Option<&str>,
+        idempotency_key: Option<&str>,
+        registration_token: Option<&str>,
+        body: &Value,
+    ) -> Result<Value, CliError> {
+        self.request(
+            "POST",
+            path,
+            token,
+            idempotency_key,
+            registration_token,
+            Some(body),
+        )
     }
 
     fn put_json(
@@ -659,7 +681,7 @@ impl HttpClient {
         idempotency_key: Option<&str>,
         body: &Value,
     ) -> Result<Value, CliError> {
-        self.request("PUT", path, token, idempotency_key, Some(body))
+        self.request("PUT", path, token, idempotency_key, None, Some(body))
     }
 
     fn request(
@@ -668,6 +690,7 @@ impl HttpClient {
         path: &str,
         token: Option<&str>,
         idempotency_key: Option<&str>,
+        registration_token: Option<&str>,
         body: Option<&Value>,
     ) -> Result<Value, CliError> {
         let body = body
@@ -686,6 +709,11 @@ impl HttpClient {
         if let Some(key) = idempotency_key {
             request.push_str("Idempotency-Key: ");
             request.push_str(key);
+            request.push_str("\r\n");
+        }
+        if let Some(token) = registration_token {
+            request.push_str("Registration-Token: ");
+            request.push_str(token);
             request.push_str("\r\n");
         }
         if !body.is_empty() {
@@ -1026,6 +1054,8 @@ Global options:
   --server <url>          Default: AGENT_MARKETPLACE_SERVER or http://127.0.0.1:8080
   --token <token>         Default: AGENT_MARKETPLACE_TOKEN or saved credentials
   --agent-id <id>         Default: AGENT_MARKETPLACE_AGENT_ID or saved credentials
+  --registration-token <token>
+                          Default: AGENT_MARKETPLACE_REGISTRATION_TOKEN
 
 Commands:
   register --agent-id <id> [--name <name>] [--endpoint <url>] [--metadata k=v]

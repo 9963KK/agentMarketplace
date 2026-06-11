@@ -1,3 +1,4 @@
+use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -38,10 +39,20 @@ pub struct PlatformApp {
     settlement_gateway: SettlementGateway,
     storage: StorageHandle,
     token_counter: Arc<AtomicU64>,
+    registration_token: Option<String>,
 }
 
 impl PlatformApp {
     pub fn spawn() -> Result<Self, ServerError> {
+        let registration_token = env::var("AGENT_MARKETPLACE_REGISTRATION_TOKEN")
+            .ok()
+            .and_then(non_empty_secret);
+        Self::spawn_with_registration_token(registration_token)
+    }
+
+    pub fn spawn_with_registration_token(
+        registration_token: Option<String>,
+    ) -> Result<Self, ServerError> {
         let registry = RegistryService::spawn();
         let tasks = TaskService::spawn();
         let live_sessions = LiveSessionService::spawn();
@@ -69,6 +80,7 @@ impl PlatformApp {
             settlement_gateway,
             storage,
             token_counter: Arc::new(AtomicU64::new(0)),
+            registration_token: registration_token.and_then(non_empty_secret),
         })
     }
 
@@ -87,7 +99,20 @@ impl PlatformApp {
         identity: AgentIdentity,
         issued_at: Timestamp,
     ) -> Result<RegisterAgentResponse, ServerError> {
+        self.register_agent_with_proof(identity, issued_at, None, None)
+            .await
+    }
+
+    pub async fn register_agent_with_proof(
+        &self,
+        identity: AgentIdentity,
+        issued_at: Timestamp,
+        owner_token: Option<&AgentToken>,
+        registration_token: Option<&str>,
+    ) -> Result<RegisterAgentResponse, ServerError> {
         let agent_id = identity.agent_id.clone();
+        self.require_registration_authority(&agent_id, owner_token, registration_token)
+            .await?;
         let outcome = self
             .registry
             .register(identity)
@@ -108,6 +133,50 @@ impl PlatformApp {
             outcome,
             token,
         })
+    }
+
+    async fn require_registration_authority(
+        &self,
+        agent_id: &AgentId,
+        owner_token: Option<&AgentToken>,
+        registration_token: Option<&str>,
+    ) -> Result<(), ServerError> {
+        let admin_authorized = self.registration_token.as_deref().is_some_and(|expected| {
+            registration_token.is_some_and(|actual| constant_time_eq(expected, actual))
+        });
+        let registered = self
+            .registry
+            .list_agents(ListAgentsQuery::new().include_deregistered(true))
+            .await
+            .map_err(|error| ServerError::component("registry", error))?
+            .into_iter()
+            .any(|agent| agent.agent_id == *agent_id);
+
+        if registered {
+            if admin_authorized {
+                return Ok(());
+            }
+            let Some(owner_token) = owner_token else {
+                return Err(ServerError::Forbidden {
+                    agent_id: agent_id.clone(),
+                    action: "re-register existing agent identity without owner proof",
+                });
+            };
+            let caller = self.authenticate(owner_token).await?;
+            if caller == *agent_id {
+                return Ok(());
+            }
+            return Err(ServerError::Forbidden {
+                agent_id: caller,
+                action: "re-register another agent identity",
+            });
+        }
+
+        if self.registration_token.is_some() && !admin_authorized {
+            return Err(ServerError::Unauthorized);
+        }
+
+        Ok(())
     }
 
     pub async fn authenticate(&self, token: &AgentToken) -> Result<AgentId, ServerError> {
@@ -987,6 +1056,23 @@ fn hash_token(token: &AgentToken) -> Result<TokenHash, ServerError> {
     Ok(TokenHash::from(digest.to_string()))
 }
 
+fn non_empty_secret(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn constant_time_eq(expected: &str, actual: &str) -> bool {
+    let expected = expected.as_bytes();
+    let actual = actual.as_bytes();
+    let mut diff = expected.len() ^ actual.len();
+    for index in 0..expected.len().max(actual.len()) {
+        let left = expected.get(index).copied().unwrap_or(0);
+        let right = actual.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
 fn replay_task(outcome: IdempotencyOutcome) -> Result<TaskId, ServerError> {
     match outcome {
         IdempotencyOutcome::Pending => Err(ServerError::IdempotencyInProgress),
@@ -1097,6 +1183,74 @@ mod tests {
             .await
             .unwrap()
             .token
+    }
+
+    #[tokio::test]
+    async fn duplicate_agent_registration_requires_owner_or_admin_proof() {
+        let app = PlatformApp::spawn().unwrap();
+        let first = app
+            .register_agent(AgentIdentity::new(AgentId::from("agent-1")), Timestamp(1))
+            .await
+            .unwrap();
+
+        let takeover = app
+            .register_agent(AgentIdentity::new(AgentId::from("agent-1")), Timestamp(2))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            takeover,
+            ServerError::Forbidden {
+                agent_id: AgentId::from("agent-1"),
+                action: "re-register existing agent identity without owner proof",
+            }
+        );
+
+        let updated = app
+            .register_agent_with_proof(
+                AgentIdentity::new(AgentId::from("agent-1")),
+                Timestamp(3),
+                Some(&first.token),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.outcome, crate::registry::RegisterOutcome::Updated);
+        app.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn registration_token_can_protect_new_registration_and_admin_recovery() {
+        let app =
+            PlatformApp::spawn_with_registration_token(Some("invite-secret".to_string())).unwrap();
+
+        assert_eq!(
+            app.register_agent(AgentIdentity::new(AgentId::from("agent-1")), Timestamp(1))
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized
+        );
+
+        app.register_agent_with_proof(
+            AgentIdentity::new(AgentId::from("agent-1")),
+            Timestamp(2),
+            None,
+            Some("invite-secret"),
+        )
+        .await
+        .unwrap();
+        let recovered = app
+            .register_agent_with_proof(
+                AgentIdentity::new(AgentId::from("agent-1")),
+                Timestamp(3),
+                None,
+                Some("invite-secret"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.outcome, crate::registry::RegisterOutcome::Updated);
+        app.shutdown().await;
     }
 
     #[tokio::test]
