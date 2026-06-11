@@ -7,8 +7,8 @@ use crate::heartbeat::{AgentId, HeartbeatEvent};
 
 use super::RegistryCore;
 use super::types::{
-    AgentCandidate, AgentIdentity, Capability, CapabilityUpdateOutcome, DiscoveryQuery,
-    RegisterOutcome, RegistryError,
+    AgentCandidate, AgentIdentity, AgentListing, Capability, CapabilityUpdateOutcome,
+    DiscoveryQuery, ListAgentsQuery, RegisterOutcome, RegistryError,
 };
 
 const DEFAULT_COMMAND_BUFFER: usize = 128;
@@ -45,6 +45,10 @@ pub enum RegistryCommand {
     Discover {
         query: DiscoveryQuery,
         reply: oneshot::Sender<Vec<AgentCandidate>>,
+    },
+    ListAgents {
+        query: ListAgentsQuery,
+        reply: oneshot::Sender<Vec<AgentListing>>,
     },
     Shutdown {
         reply: oneshot::Sender<()>,
@@ -155,6 +159,18 @@ impl RegistryHandle {
     ) -> Result<Vec<AgentCandidate>, RegistryServiceError> {
         let (reply, response) = oneshot::channel();
         self.send(RegistryCommand::Discover { query, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RegistryServiceError::ResponseDropped)
+    }
+
+    pub async fn list_agents(
+        &self,
+        query: ListAgentsQuery,
+    ) -> Result<Vec<AgentListing>, RegistryServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RegistryCommand::ListAgents { query, reply })
             .await?;
         response
             .await
@@ -285,6 +301,10 @@ impl RegistryService {
                 let _ = reply.send(self.core.discover(query));
                 None
             }
+            RegistryCommand::ListAgents { query, reply } => {
+                let _ = reply.send(self.core.list_agents(query));
+                None
+            }
             RegistryCommand::Shutdown { reply } => Some(reply),
         }
     }
@@ -352,6 +372,25 @@ mod tests {
         assert_eq!(outcome, RegisterOutcome::Registered);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].agent_id, agent("agent-1"));
+
+        registry.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_lists_registered_agents() {
+        let registry = RegistryService::spawn();
+
+        registry.register(identity("agent-2")).await.unwrap();
+        registry.register(identity("agent-1")).await.unwrap();
+        registry.mark_alive(agent("agent-1")).await.unwrap();
+
+        let listings = registry.list_agents(ListAgentsQuery::new()).await.unwrap();
+
+        assert_eq!(listings.len(), 2);
+        assert_eq!(listings[0].agent_id, agent("agent-1"));
+        assert!(listings[0].alive);
+        assert_eq!(listings[1].agent_id, agent("agent-2"));
+        assert!(!listings[1].alive);
 
         registry.shutdown().await.unwrap();
     }

@@ -56,6 +56,11 @@ agent-marketplace declare-capabilities \
 # 发现
 agent-marketplace discover --capability "code-review"
 
+# 市场名录
+agent-marketplace list-agents
+agent-marketplace list-agents --alive-only
+agent-marketplace list-agents --include-deregistered
+
 # 注销
 agent-marketplace deregister --agent-id "agent-1"
 
@@ -154,6 +159,7 @@ declare-capabilities
 ping
 daemon
 discover
+list-agents
 create-task
 add-participant
 create-session
@@ -178,6 +184,15 @@ deregister
 复杂协议对象通过 JSON 文件输入：`submit-artifact --manifest <file.json>` 读取 ArtifactManifest；`request-review --criteria-json <file.json>` 可以读取完整 ReviewCriteria，或用 `--criteria <text>` 生成 PlainText criteria。
 
 第一版 CLI 覆盖的是平台原子操作，不负责自动排布 Agent。买家 Agent 仍然负责选择执行 Agent、选择对应 Review Agent、决定链路顺序，并在需要时调用上述命令/API 写入任务参与集合、LiveSession、Assignment、ReviewRequest 和 Hold。
+
+`list-agents` 和 `discover` 的语义不同：
+
+| 命令 | 用途 | 返回范围 |
+|------|------|----------|
+| `list-agents` | 查看 Registry 市场名录 | 默认返回未注销的注册 Agent，包含 `alive`、`lifecycle`、capabilities |
+| `list-agents --alive-only` | 查看当前在线 Agent 名录 | 返回在线且未注销 Agent |
+| `list-agents --include-deregistered` | 运维或调试查看历史身份 | 包含已注销 Agent |
+| `discover --capability <name>` | 选择可交易候选 | 只返回在线、有该 capability、且默认不 busy 的 Agent |
 
 ---
 

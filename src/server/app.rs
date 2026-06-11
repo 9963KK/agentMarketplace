@@ -5,7 +5,8 @@ use crate::artifact::{ArtifactManifest, sha256_digest};
 use crate::heartbeat::{AgentId, HeartbeatConfig, HeartbeatHandle, HeartbeatService};
 use crate::livesession::{Assignment, AssignmentKind, LiveSessionHandle, LiveSessionService};
 use crate::registry::{
-    AgentCandidate, AgentIdentity, Capability, DiscoveryQuery, RegistryHandle, RegistryService,
+    AgentCandidate, AgentIdentity, AgentListing, Capability, DiscoveryQuery, ListAgentsQuery,
+    RegistryHandle, RegistryService,
 };
 use crate::review::{ReviewHandle, ReviewService, ReviewSession, Verdict};
 use crate::runtime::Runtime;
@@ -164,6 +165,16 @@ impl PlatformApp {
     ) -> Result<Vec<AgentCandidate>, ServerError> {
         self.registry
             .discover(query)
+            .await
+            .map_err(|error| ServerError::component("registry", error))
+    }
+
+    pub async fn list_agents(
+        &self,
+        query: ListAgentsQuery,
+    ) -> Result<Vec<AgentListing>, ServerError> {
+        self.registry
+            .list_agents(query)
             .await
             .map_err(|error| ServerError::component("registry", error))
     }
@@ -1110,6 +1121,12 @@ mod tests {
                 .len(),
             1
         );
+        let listed_agents = app
+            .list_agents(crate::registry::ListAgentsQuery::new())
+            .await
+            .unwrap();
+        assert_eq!(listed_agents.len(), 3);
+        assert!(listed_agents.iter().any(|agent| agent.alive));
 
         app.deposit(&publisher_token, key("deposit"), 130, Timestamp(4))
             .await

@@ -4,8 +4,9 @@ use crate::artifact::{MediaProfileId, find_media_profile};
 use crate::heartbeat::AgentId;
 
 use super::types::{
-    AgentCandidate, AgentIdentity, AgentInfo, AgentLifecycle, Capability, CapabilityName,
-    CapabilityUpdateOutcome, DiscoveryQuery, LoadInfo, RegisterOutcome, RegistryError,
+    AgentCandidate, AgentIdentity, AgentInfo, AgentLifecycle, AgentListing, Capability,
+    CapabilityName, CapabilityUpdateOutcome, DiscoveryQuery, ListAgentsQuery, LoadInfo,
+    RegisterOutcome, RegistryError,
 };
 
 #[derive(Debug, Default)]
@@ -183,6 +184,46 @@ impl RegistryCore {
         }
 
         candidates
+    }
+
+    pub fn list_agents(&self, query: ListAgentsQuery) -> Vec<AgentListing> {
+        let mut agent_ids: Vec<&AgentId> = self.agents.keys().collect();
+        agent_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+
+        let mut listings = Vec::new();
+        for agent_id in agent_ids {
+            let Some(info) = self.agents.get(agent_id) else {
+                continue;
+            };
+            let alive = self.alive_agents.contains(agent_id);
+            if query.alive_only && !alive {
+                continue;
+            }
+            if !query.include_deregistered && info.lifecycle == AgentLifecycle::Deregistered {
+                continue;
+            }
+
+            listings.push(AgentListing {
+                agent_id: agent_id.clone(),
+                name: info.identity.name.clone(),
+                endpoint: info.identity.endpoint.clone(),
+                metadata: info.identity.metadata.clone(),
+                capabilities: info.capabilities.values().cloned().collect(),
+                lifecycle: info.lifecycle,
+                alive,
+                current_load: self
+                    .load
+                    .get(agent_id)
+                    .map(|load| load.current)
+                    .unwrap_or(0),
+            });
+
+            if query.limit.is_some_and(|limit| listings.len() >= limit) {
+                break;
+            }
+        }
+
+        listings
     }
 
     pub fn get(&self, agent_id: &AgentId) -> Option<&AgentInfo> {
@@ -386,6 +427,50 @@ mod tests {
             contract.output_profiles,
             vec![profile("application.vnd.agent.review-verdict-json.v1")]
         );
+    }
+
+    #[test]
+    fn list_agents_returns_registry_directory_with_alive_state() {
+        let mut registry = RegistryCore::new();
+        registry.register(identity("agent-b")).unwrap();
+        registry.register(identity("agent-a")).unwrap();
+        registry
+            .declare_capabilities(&agent("agent-a"), vec![capability("review", 1)])
+            .unwrap();
+        registry.mark_alive(&agent("agent-a"));
+
+        let listings = registry.list_agents(ListAgentsQuery::new());
+
+        assert_eq!(listings.len(), 2);
+        assert_eq!(listings[0].agent_id, agent("agent-a"));
+        assert_eq!(
+            listings[0].capabilities[0].name,
+            CapabilityName::from("review")
+        );
+        assert!(listings[0].alive);
+        assert_eq!(listings[1].agent_id, agent("agent-b"));
+        assert!(!listings[1].alive);
+    }
+
+    #[test]
+    fn list_agents_can_filter_alive_and_deregistered_agents() {
+        let mut registry = RegistryCore::new();
+        registry.register(identity("agent-1")).unwrap();
+        registry.register(identity("agent-2")).unwrap();
+        registry.mark_alive(&agent("agent-1"));
+        assert!(registry.deregister(&agent("agent-1")));
+
+        assert_eq!(registry.list_agents(ListAgentsQuery::new()).len(), 1);
+        assert!(
+            registry
+                .list_agents(ListAgentsQuery::new().alive_only(true))
+                .is_empty()
+        );
+
+        let all = registry.list_agents(ListAgentsQuery::new().include_deregistered(true));
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].lifecycle, AgentLifecycle::Deregistered);
+        assert!(!all[0].alive);
     }
 
     #[test]

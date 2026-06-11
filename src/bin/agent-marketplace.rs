@@ -163,6 +163,30 @@ fn run(args: Vec<String>) -> Result<(), CliError> {
             let response = client.get(&path, None)?;
             print_json(&response)?;
         }
+        "list-agents" => {
+            let alive_only = parser.take_flag("--alive-only");
+            let include_deregistered = parser.take_flag("--include-deregistered");
+            let limit = parser.take_option("--limit");
+            parser.finish()?;
+
+            let mut params = Vec::new();
+            if alive_only {
+                params.push("alive_only=true".to_string());
+            }
+            if include_deregistered {
+                params.push("include_deregistered=true".to_string());
+            }
+            if let Some(limit) = limit {
+                params.push(format!("limit={}", encode_query(&limit)));
+            }
+            let path = if params.is_empty() {
+                "/agents".to_string()
+            } else {
+                format!("/agents?{}", params.join("&"))
+            };
+            let response = client.get(&path, None)?;
+            print_json(&response)?;
+        }
         "create-task" => {
             let token = require_token(token)?;
             let idempotency_key = parser
@@ -1009,6 +1033,7 @@ Commands:
   ping [--busy]
   daemon [--interval seconds] [--busy]
   discover --capability <name> [--include-busy] [--limit n]
+  list-agents [--alive-only] [--include-deregistered] [--limit n]
   create-task
   add-participant --task-id <id> --participant-agent-id <id>
   create-session --task-id <id>

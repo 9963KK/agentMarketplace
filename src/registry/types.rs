@@ -159,6 +159,46 @@ pub struct AgentCandidate {
     pub max_concurrency: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentListing {
+    pub agent_id: AgentId,
+    pub name: Option<String>,
+    pub endpoint: Option<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub capabilities: Vec<Capability>,
+    pub lifecycle: AgentLifecycle,
+    pub alive: bool,
+    pub current_load: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListAgentsQuery {
+    pub include_deregistered: bool,
+    pub alive_only: bool,
+    pub limit: Option<usize>,
+}
+
+impl ListAgentsQuery {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn include_deregistered(mut self, include_deregistered: bool) -> Self {
+        self.include_deregistered = include_deregistered;
+        self
+    }
+
+    pub fn alive_only(mut self, alive_only: bool) -> Self {
+        self.alive_only = alive_only;
+        self
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum RegisterOutcome {
     Registered,

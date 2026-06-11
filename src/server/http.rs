@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 
 use crate::artifact::ArtifactManifest;
 use crate::heartbeat::AgentId;
-use crate::registry::{AgentIdentity, DiscoveryQuery};
+use crate::registry::{AgentIdentity, DiscoveryQuery, ListAgentsQuery};
 use crate::review::{ReviewId, Verdict};
 use crate::settlement::{Balance, HoldId, HoldRequest};
 use crate::storage::IdempotencyKey;
@@ -30,6 +30,7 @@ pub fn router(app: PlatformApp) -> Router {
         .route("/agents/register", post(register_agent))
         .route("/agents/capabilities", put(declare_capabilities))
         .route("/agents/deregister", post(deregister))
+        .route("/agents", get(list_agents))
         .route("/agents/discover", get(discover))
         .route("/agents/heartbeat", post(ping))
         .route("/agents/{agent_id}/assignments", get(assignments_by_agent))
@@ -123,6 +124,23 @@ async fn discover(
         discovery = discovery.limit(limit);
     }
     Ok(Json(app.discover(discovery).await?))
+}
+
+async fn list_agents(
+    State(app): State<PlatformApp>,
+    Query(query): Query<ListAgentsParams>,
+) -> Result<Json<Vec<crate::registry::AgentListing>>, HttpError> {
+    let mut registry_query = ListAgentsQuery::new();
+    if let Some(include_deregistered) = query.include_deregistered {
+        registry_query = registry_query.include_deregistered(include_deregistered);
+    }
+    if let Some(alive_only) = query.alive_only {
+        registry_query = registry_query.alive_only(alive_only);
+    }
+    if let Some(limit) = query.limit {
+        registry_query = registry_query.limit(limit);
+    }
+    Ok(Json(app.list_agents(registry_query).await?))
 }
 
 async fn ping(
@@ -479,6 +497,13 @@ impl DiscoverParams {
             .or(self.capability)
             .ok_or_else(|| ServerError::BadRequest("missing cap or capability query".to_string()))
     }
+}
+
+#[derive(Deserialize)]
+struct ListAgentsParams {
+    include_deregistered: Option<bool>,
+    alive_only: Option<bool>,
+    limit: Option<usize>,
 }
 
 #[derive(Serialize)]

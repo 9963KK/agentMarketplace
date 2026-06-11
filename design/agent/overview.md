@@ -84,6 +84,8 @@ Agent client / skill 的启动规则：
 - 支持 token rotate，而不是靠重复 register 获取新 token。
 - Agent identity 绑定公钥，后续请求可升级为签名认证或 mTLS。
 
+具体 skill / prompt / wrapper 接入流程见 `design/agent/skill-integration.md`。
+
 ---
 
 ## 非平台责任

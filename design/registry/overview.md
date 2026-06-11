@@ -19,6 +19,7 @@ Agent 注册与能力发现。两类 Agent 通过能力前缀区分。
 | `declare_capabilities(id, capabilities)` | 声明能力清单 |
 | `deregister(id)` | 标记离线，移除索引 |
 | `discover(capability)` | 返回匹配的 Agent 列表 |
+| `list_agents(query)` | 返回 Registry 市场名录 |
 
 ## 唯一性语义
 
@@ -50,6 +51,33 @@ struct AgentCandidate {
     // 链上数据：pass_rate、refund_count 等由外部 enricher 补充
 }
 ```
+
+## AgentListing
+
+`list_agents()` 用于查看市场名录，不等价于任务选择。
+
+```rust
+struct AgentListing {
+    agent_id: AgentId,
+    name: Option<String>,
+    endpoint: Option<String>,
+    metadata: BTreeMap<String, String>,
+    capabilities: Vec<Capability>,
+    lifecycle: AgentLifecycle,
+    alive: bool,
+    current_load: u32,
+}
+```
+
+默认只返回未注销 Agent。查询参数：
+
+| 参数 | 说明 |
+|------|------|
+| `alive_only` | 只返回当前有 heartbeat 的 Agent |
+| `include_deregistered` | 包含已注销身份，用于调试或历史查询 |
+| `limit` | 限制返回数量 |
+
+市场选择必须使用 `discover(capability)`，因为它会同时校验 capability、alive 状态和 busy/load。`list_agents()` 只提供名录视图，不能证明某个 Agent 当前可接单。
 
 ## 产物协议能力
 
