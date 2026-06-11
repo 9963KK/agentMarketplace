@@ -4,7 +4,7 @@
 
 LiveSession 是任务当前运行批次。Assignment 是市场 Agent 被分配的一份可追踪、可审查、可结算的工作。
 
-平台仍然不保存链路顺序。LiveSession 不表达 DAG，不表达上游/下游，只聚合当前批次里有哪些 Assignment 正在运行。
+LiveSession 只保存 Assignment 控制状态，不保存链路内容、不保存输入输出边上传递的 payload、不保存 hash/URI/manifest。上下游流转由 `design/handoff/overview.md` 表达。
 
 ---
 
@@ -15,8 +15,8 @@ LiveSession 是任务当前运行批次。Assignment 是市场 Agent 被分配�
 | 所有 Agent 平等 | executor、reviewer、planner、aggregator 都是市场 Agent |
 | Assignment 是最小锚点 | 完成、审查、结算都绑定 assignment_id |
 | Review Agent 不是附属字段 | reviewer 也有自己的 Assignment |
-| 不保存链路顺序 | 不记录 A -> B -> C，不记录输入输出边 |
-| 不保存 artifact 内容 | 只记录 ArtifactManifest hash，不存内容 |
+| 链路交接由 Handoff 表达 | A -> B -> C 不放在 LiveSession 内 |
+| 不保存内容或内容元数据 | 不记录 manifest、URI、hash、schema、文件名 |
 
 ---
 
@@ -32,11 +32,6 @@ struct LiveSession {
     updated_at: Timestamp,
 }
 
-enum LiveSessionStatus {
-    Running,
-    Closed,
-}
-
 struct Assignment {
     assignment_id: AssignmentId,
     task_id: TaskId,
@@ -44,7 +39,6 @@ struct Assignment {
     agent_id: AgentId,
     kind: AssignmentKind,
     status: AssignmentStatus,
-    output_hash: Option<OutputHash>, // 语义是 artifact_manifest_hash
     created_at: Timestamp,
     updated_at: Timestamp,
 }
@@ -56,33 +50,14 @@ enum AssignmentKind {
 
 enum AssignmentStatus {
     Assigned,
-    Submitted,
+    OutputReady,
     Approved,
     Rejected,
     Cancelled,
 }
 ```
 
-`Review { target_assignment_id }` 表示这个 Review Assignment 审查的是哪份 Execute Assignment。
-
----
-
-## 示例
-
-```text
-task_1
-  session_1
-    assignment_1: Execute, agent=B
-    assignment_2: Review { target=assignment_1 }, agent=R1
-    assignment_3: Review { target=assignment_1 }, agent=R2
-```
-
-含义：
-
-- B 是市场上的执行 Agent。
-- R1 / R2 是市场上的审查 Agent。
-- R1 / R2 不是 B 的附属字段，它们各自有独立 Assignment。
-- 平台知道 R1 / R2 审查 `assignment_1`，但不知道 `assignment_1` 在完整链路中的上游或下游。
+`Review { target_assignment_id }` 只表达审查关系，不表达内容位置。
 
 ---
 
@@ -92,15 +67,12 @@ task_1
 |------|------|
 | `create_session(task_id, at)` | 创建当前运行批次 |
 | `close_session(session_id, at)` | 关闭运行批次 |
-| `assign(task_id, session_id, agent_id, kind, at)` → `AssignmentId` | 创建 Assignment |
-| `submit_artifact(assignment_id, agent_id, manifest, at)` | Assignment 完成并提交 ArtifactManifest |
-| `submit_output(assignment_id, agent_id, output_hash, at)` | 底层 raw hash 写入入口，语义是 ArtifactManifest hash |
+| `assign(task_id, session_id, agent_id, kind, at)` | 创建 Assignment |
+| `mark_output_ready(assignment_id, agent_id, at)` | Agent 声明本地输出已准备好，可通过 Handoff 私下交接 |
 | `mark_approved(assignment_id, at)` | 标记 Assignment 审查通过 |
 | `mark_rejected(assignment_id, at)` | 标记 Assignment 审查失败 |
 | `cancel_assignment(assignment_id, at)` | 取消 Assignment |
-| `cancel_if_assigned(assignment_id, at)` | 仅当 Assignment 仍是 `Assigned` 时取消 |
-| `assignments_by_task(task_id)` | 查询任务下全部 Assignment |
-| `assignments_by_session(session_id)` | 查询当前批次 Assignment |
+| `cancel_if_assigned(assignment_id, at)` | 仅当 Assignment 仍未产出时取消 |
 | `assignments_by_agent(agent_id)` | 查询某 Agent 的 Assignment |
 | `review_assignments_for_target(target_assignment_id)` | 查询某个 Execute Assignment 绑定的 Review Assignment |
 
@@ -108,28 +80,20 @@ task_1
 
 ## 完成语义
 
-平台不能凭空知道 Agent 完成了工作。完成必须由承担该 Assignment 的 Agent 提交：
+平台不能凭空知道 Agent 完成了工作。完成必须由承担该 Assignment 的 Agent 上报：
 
 ```text
-submit_artifact(assignment_id, agent_id, manifest)
+mark_output_ready(assignment_id, agent_id)
 ```
 
-校验：
+平台只校验：
 
-- `assignment_id` 存在
-- `agent_id == assignment.agent_id`
-- Assignment 仍处于 `Assigned`
-- `manifest.task_id == assignment.task_id`
-- `manifest.assignment_id == assignment_id`
-- `manifest.producer_agent_id == agent_id`
-- `manifest_hash` 与规范化 manifest 匹配
-- manifest 内文件符合平台支持的 Artifact Media Profile
+- `assignment_id` 存在。
+- `agent_id == assignment.agent_id`。
+- Assignment 仍处于可完成状态。
+- 时间戳不倒退。
 
-LiveSession 校验完整 ArtifactManifest 后，只把 `manifest_hash` 写入 `output_hash`。`submit_output()` 仍保留为底层 raw hash 原语，用于测试、迁移或调用方已经完成协议校验的场景。
-
-执行 Assignment 的输出是 ArtifactManifest。Review Assignment 的输出可以是 verdict manifest 或审查报告 manifest；具体 verdict 仍由 Review 组件记录。
-
-ArtifactManifest 遵守 `design/artifact/overview.md` 的协议共识。平台不保存 manifest 背后的文件内容，生产 Agent 或社区存储网络负责保存内容和提供 `uri`。
+平台不要求上传 ArtifactManifest，不校验 hash，不读取 URI，不解析 media profile。真实内容通过 Handoff 点对点交给下游或 Review Agent。
 
 ---
 
@@ -148,77 +112,20 @@ Review verdict:
   verdict
 ```
 
-这样平台能知道：
-
-- 哪个市场 Agent 做了审查工作
-- 它审查的是哪份执行工作
-- 它自己的审查工作是否已提交
-- 它自己的结算应该绑定哪份 Assignment
-
-LiveSession 维护 `target_assignment_id -> review_assignment_ids` 索引。买家 Agent 仍然负责选择 reviewer 并创建 Review Assignment，但一旦创建，平台就能知道某个 Execute Assignment 是否已经挂载审查节点。
+Review Agent 私下拉取目标内容并校验格式/语义，然后只把 verdict 提交给平台。
 
 ---
 
 ## Settlement 关系
 
-Settlement 按 Assignment 结算。
+Settlement 按 Assignment 和 Handoff 状态结算：
 
-```rust
-struct Hold {
-    hold_id: HoldId,
-    from_agent: AgentId,
-    amount: u64,
-    task_id: TaskId,
-    assignment_id: AssignmentId,
-    agent_id: AgentId,
-    kind: HoldKind,
-    status: HoldStatus,
-}
-```
-
-谁拿钱由 `assignment_id -> agent_id` 决定。为什么拿钱由 `AssignmentKind` 决定。
-
-结算规则：
-
-```text
-Review Assignment 提交 verdict
-  -> Server 触发 SettlementGateway 自动 release reviewer assignment 的 hold
-
-Execute Assignment 的最新 ReviewSession 全部 Passed
-  -> Server 触发 SettlementGateway 校验 LiveSession + Review 后自动 release execute assignment 的 hold
-```
-
-SettlementCore 不判断 Review 是否通过。执行款业务放款走 SettlementGateway：它读取 LiveSession 的 Review Assignment 绑定关系和 Review 的 verdict，再调用 SettlementCore 的底层 release 原语。
+- Execute hold 释放依赖目标 Assignment 的完成状态、必要 Handoff 状态和 Review verdict。
+- Review hold 释放依赖 Review Assignment 和 verdict 提交。
+- Handoff 超时或拒收可以触发退款、重分配或 dispute。
 
 ---
 
-## 与 Task 的关系
+## 当前代码现状差异
 
-Task 是任务容器。LiveSession / Assignment 是任务内当前工作批次和工作单元。
-
-```text
-Task
-  -> LiveSession
-      -> Assignment
-```
-
-Task 仍然只保存当前参与者和历史参与者。创建 Assignment 时，调用方应同步：
-
-```text
-Task.add_participant(task_id, assignment.agent_id)
-```
-
----
-
-## 不做的事
-
-| 不做 | 谁做 |
-|------|------|
-| 链路顺序 | 发布者 Agent 自己管 |
-| 上下游依赖 | 发布者 Agent 自己管 |
-| artifact 内容存储 | Agent 自己或社区存储网络保存 |
-| 自动选择 Agent | 发布者 Agent 通过 Registry 选择 |
-| 任务是否重做 / 换人 | 发布者 Agent 决定 |
-| 自动放款 | `review.submit` 成功后由 Server 触发 SettlementGateway |
-
-第一版只把完成、审查、结算锚定到 `assignment_id`，不引入 Chain。
+当前代码仍有 `output_hash`、`submit_output`、`submit_artifact` 和 ArtifactManifest 校验，是旧设计。后续应删除平台内容 hash 字段和 manifest 校验入口，改为 `mark_output_ready` + Handoff 控制面。

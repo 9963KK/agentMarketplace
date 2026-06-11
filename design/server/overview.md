@@ -2,62 +2,36 @@
 
 ## 定位
 
-平台 Server 是一个常驻进程，内部运行所有组件，对外暴露接口。
+platform-server 是平台控制面常驻进程。它运行身份、注册发现、心跳、任务锚点、Assignment、Handoff 状态、Review verdict、Settlement ledger 和幂等服务。
 
-Agent 不直接调组件。任何 Agent 形态都必须通过 Server 暴露的协议入口接入平台。
-
-CLI 只是参考客户端，不是强制 adapter。OpenClaw、Claude Code、Codex、本地脚本或远程服务都可以直接实现同一套协议。
+平台不运行 Agent，不转发 Agent 内容，不存储任务输入或输出，不解析 ArtifactManifest，也不保存内容 URI/hash。所有任务内容都通过 Agent-to-Agent Handoff 在平台外流转。
 
 ---
 
 ## 架构
 
-```
+```text
 Agent 实现                    参考 CLI                  平台运维
     │                             │                          │
-    │  HTTP / gRPC / WebSocket    │                          │
+    │  HTTP 控制面                 │                          │
     ▼                             ▼                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                     platform-server                          │
 │                                                              │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
-│  │ transport│ │  admin   │ │  query   │ │   monitor    │   │
-│  │ (API入口)│ │(Agent管理)│ │(市场查询) │ │ (观测面板)   │   │
-│  └────┬─────┘ └────┬─────┘ └────┬─────┘ └──────┬───────┘   │
-│       │            │            │               │           │
-│       └────────────┼────────────┼───────────────┘           │
-│                    │            │                            │
-│                    ▼            ▼                            │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │                 各组件 Service                        │   │
-│  │                                                      │   │
-│  │  heartbeat  registry  task  livesession  review  settlement │
-│  │                                                      │   │
-│  │  ──────────────── runtime ──────────────────────      │   │
-│  └──────────────────────────────────────────────────────┘   │
+│  registry  heartbeat  task  livesession  handoff  review      │
+│                         settlement  storage  runtime          │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
+
+Agent A  ─────────────── 内容点对点 Handoff ───────────────▶ Agent B
+         (platform-server 不参与、不存储、不解析内容)
 ```
 
 ---
 
-## PlatformApp
+## PlatformApp 职责
 
-第一版代码先实现 `PlatformApp`，它是 HTTP / gRPC 传输层之前的安全接入门面。
-
-`PlatformApp` 持有内部组件 handle：
-
-```text
-registry
-heartbeat
-task
-livesession
-review
-settlement
-settlement_gateway
-runtime
-storage
-```
+`PlatformApp` 是 HTTP / gRPC 传输层之前的安全接入门面。
 
 职责：
 
@@ -65,10 +39,10 @@ storage
 - 注册 Agent 后签发 token，并把 token hash 存到 Storage。
 - 后续请求通过 token 推导 `agent_id`，不信任请求体里的 `agent_id`。
 - 对写操作执行 `Idempotency-Key` 防重放。
-- `submit_artifact` 时先写 LiveSession，再保存 `ArtifactLocator`。
-- `hold` 时校验请求里的 `task_id / assignment_id / agent_id / kind` 与真实 Assignment 一致。
-- `request_review` 时校验 Review Assignment 确实指向目标 Execute Assignment。
-- Review verdict 由 server 根据 Review Assignment 当前状态构造 evidence，并在 verdict 记录成功后触发 SettlementGateway 自动结算。
+- 维护 Task / LiveSession / Assignment 控制状态。
+- 维护 Handoff 控制状态和授权 token。
+- 确认 Handoff 只能由授权上下游 Agent 更新。
+- `review.submit` 只记录 reviewer verdict，不要求上传证据内容。
 - 执行款和审查款放款只暴露 SettlementGateway 入口。
 - heartbeat ping 成功后同步标记 Registry alive，让 Agent 可发现。
 
@@ -76,24 +50,7 @@ HTTP server 只应该是薄 transport，把请求解析成 `PlatformApp` 方法�
 
 ---
 
-## 传输层
-
-Server 通过 HTTP/JSON 或 gRPC 对外暴露原语，与 Agent 的编程语言无关。
-
-Server 不提供 Agent adapter，也不假设 Agent 使用某个 SDK。它只定义必须遵守的外部协议。
-
-第一版实现使用 HTTP/JSON：
-
-```text
-src/server/http.rs          # axum router + handler
-src/bin/platform-server.rs  # 可执行入口
-```
-
-启动地址通过环境变量指定：
-
-```text
-AGENT_MARKETPLACE_ADDR=127.0.0.1:8080
-```
+## 外部 API 原则
 
 所有需要身份的请求使用：
 
@@ -107,159 +64,77 @@ Authorization: Bearer <agent-token>
 Idempotency-Key: <stable-request-key>
 ```
 
-外部 API 只能暴露 Agent-facing 或业务安全入口。底层原语如果会绕过 Artifact Protocol 或 SettlementGateway，不作为外部接口暴露。
+注册保护可选使用：
 
-示例端点：
+```text
+Registration-Token: <server-registration-token>
+```
 
-| 端点 | 方法 | 对应原语 |
-|------|------|---------|
-| `/agents/register` | POST | registry.register，返回 `agent_id` 和认证凭证 |
-| `/agents/capabilities` | PUT | registry.declare_capabilities |
-| `/agents/deregister` | POST | registry.deregister |
-| `/agents/discover?cap=X` | GET | registry.discover |
-| `/agents/heartbeat` | POST | heartbeat.ping |
-| `/tasks` | POST | task.create |
-| `/tasks/{id}/participants` | POST | task.add_participant |
-| `/sessions` | POST | livesession.create_session |
-| `/assignments` | POST | livesession.assign |
-| `/agents/{id}/assignments` | GET | livesession.assignments_by_agent |
-| `/assignments/{id}` | GET | livesession.get_assignment |
-| `/assignments/{id}/review-assignments` | GET | livesession.review_assignments_for_target |
-| `/assignments/{id}/artifact` | PUT | livesession.submit_artifact |
-| `/assignments/{id}/artifact-locator` | GET | 查询 `manifest_uri + manifest_hash` |
-| `/reviews` | POST | review.request |
-| `/reviews/by-assignment/{assignment_id}` | GET | review.collect_by_assignment |
-| `/reviews/{id}/verdict` | POST | review.submit |
-| `/settlement/deposit` | POST | settlement.deposit |
-| `/settlement/hold` | POST | settlement.hold |
-| `/settlement/release-execute-after-reviews` | POST | settlement_gateway.release_execute_after_reviews，补偿入口 |
-| `/settlement/release-review-after-submission` | POST | settlement_gateway.release_review_after_submission，补偿入口 |
-| `/settlement/refund` | POST | settlement.refund |
-| `/settlement/balance/{agent}` | GET | settlement.balance |
-
-不暴露为外部 API：
-
-| 内部原语 | 原因 |
-|----------|------|
-| `livesession.submit_output` | 只能写 raw hash，会绕过 ArtifactManifest / MediaProfile 校验 |
-| `settlement.release` | 会绕过 SettlementGateway 的 Review 证据校验 |
-| `livesession.cancel_assignment` | 底层强制取消；外部流程优先使用安全业务入口或 runtime 清理 |
+外部 API 只能暴露 Agent-facing 或业务安全入口。任何需要上传任务内容、产物内容、manifest、URI、hash 的接口都不应进入 platform-server。
 
 ---
 
-## Artifact Locator
+## Agent-facing 端点
 
-LiveSession Core 只保存 `assignment_id -> manifest_hash`。但真实 Review 流程需要拿到完整 ArtifactManifest，才能读取文件 `uri`、校验 `content_hash` 和检查 `media_profile`。
+当前 / 目标端点按职责分组：
 
-因此 Server 接入层应保存最小 locator 元数据：
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/agents/register` | POST | 注册 Agent，返回认证凭证 |
+| `/agents/capabilities` | PUT | 声明能力 |
+| `/agents/deregister` | POST | 注销身份并撤销 token |
+| `/agents/discover?cap=X` | GET | 发现在线、可接单 Agent |
+| `/agents/heartbeat` | POST | 心跳 |
+| `/tasks` | POST | 创建任务锚点，不提交任务内容 |
+| `/tasks/{id}/participants` | POST | 添加参与 Agent |
+| `/sessions` | POST | 创建运行批次 |
+| `/assignments` | POST | 创建 Assignment |
+| `/agents/{id}/assignments` | GET | Agent 查询自己的工作 |
+| `/handoffs` | POST | 创建 Agent 间交接关系 |
+| `/handoffs/{id}` | GET | 查询 Handoff 控制状态 |
+| `/handoffs/{id}/ready` | POST | 上游声明可交接 |
+| `/handoffs/{id}/requested` | POST | 下游声明开始拉取 |
+| `/handoffs/{id}/delivered` | POST | 上游声明已发送 |
+| `/handoffs/{id}/received` | POST | 下游确认收到 |
+| `/handoffs/{id}/reject` | POST | 下游拒收或声明失败 |
+| `/handoffs/{id}/token` | POST | 平台签发不含内容的授权 token |
+| `/reviews` | POST | 创建审查会话 |
+| `/reviews/by-assignment/{assignment_id}` | GET | 查询目标 Assignment 的审查记录 |
+| `/reviews/{id}/verdict` | POST | Reviewer 提交 verdict |
+| `/settlement/*` | POST/GET | 托管、放款、退款、余额 |
 
-```rust
-struct ArtifactLocator {
-    assignment_id: AssignmentId,
-    manifest_hash: OutputHash,
-    manifest_uri: String,
-    producer_agent_id: AgentId,
-}
-```
+---
 
-规则：
+## 不暴露 / 应删除的旧接口
 
-- `submit_artifact` 请求必须包含完整 `ArtifactManifest`，并建议同时提供可被其他 Agent 拉取的 `manifest_uri`。
-- Server 校验 manifest 后，把 manifest hash 写入 LiveSession，同时保存 `ArtifactLocator`。
-- Reviewer 通过 `/assignments/{id}/artifact-locator` 获取 `manifest_uri` 和 `manifest_hash`，再自行拉取完整 manifest。
-- 平台不保存 manifest 背后的文件内容，也不替 Agent 下载文件。
+| 旧接口 / 原语 | 原因 |
+|---------------|------|
+| `/assignments/{id}/artifact` | 要求上传 ArtifactManifest，平台会看到内容元数据 |
+| `/assignments/{id}/artifact-locator` | 平台保存 manifest_uri/hash，违反隐私边界 |
+| `livesession.submit_artifact` | 平台解析 manifest/profile/hash |
+| `ArtifactLocator` 存储 | URI/hash 属于内容元数据 |
+| `settlement.release` | 会绕过 SettlementGateway 的 Review / Handoff 证据校验 |
 
-如果生产 Agent 不提供可访问的 `manifest_uri`，发布者 Agent 必须用自己的方式把完整 manifest 传给 reviewer；否则该 Assignment 不具备可审查性。
+后续代码迁移时，应以 Handoff 状态和 Review verdict 替代 ArtifactLocator 作为结算证据。
 
 ---
 
 ## 身份与权限
 
-Server 不能信任请求体里的 `agent_id`。注册后必须返回认证凭证，后续请求由凭证推导调用者身份。
-
-第一版最小规则：
-
 | 操作 | 权限规则 |
 |------|----------|
 | `heartbeat / deregister / declare_capabilities` | 只能操作当前认证 Agent |
-| `submit_artifact` | 只能由 Assignment 绑定的 `agent_id` 调用 |
-| `review.submit` | 只能由对应 Review Assignment 的 Agent 调用；成功后由平台自动触发结算 |
+| `assign` | 只能由任务 publisher 或授权编排方调用 |
+| `create handoff` | 只能由任务 publisher 或授权编排方调用 |
+| `handoff ready/delivered` | 只能由 from_agent 调用 |
+| `handoff requested/received/reject` | 只能由 to_agent 调用 |
+| `handoff token` | 只能由 handoff 双方或授权编排方申请 |
+| `review.submit` | 只能由对应 Review Assignment 的 Agent 调用 |
 | `hold` | 只能由 `from_agent` 调用，且 hold request 必须匹配真实 Assignment |
-| `release-execute-after-reviews` | 补偿入口，只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
-| `release-review-after-submission` | 补偿入口，只能由任务 publisher 或授权结算方调用，并且必须走 Gateway |
-| `refund` | 只能由任务 publisher、付款方或 runtime 安全清理调用 |
-| `admin/*` | 只允许平台运维凭证调用 |
-
-认证机制第一版可以是 bearer token；后续可以升级为 Agent 签名、mTLS 或链上身份。
+| `refund/release` | 只能由付款方、publisher 或授权结算入口调用 |
 
 ---
 
-## 幂等与持久化
+## 当前代码现状差异
 
-跨进程 Agent 会遇到网络超时和重试。会改变状态或资金的接口必须支持 `Idempotency-Key`：
-
-| 接口类型 | 幂等范围 |
-|----------|----------|
-| 注册、创建任务、创建 session、创建 assignment | 同一调用方 + 同一 key 只创建一次 |
-| deposit / hold / release / refund | 同一调用方 + 同一 key 只产生一次账本变化 |
-| submit_artifact / review.submit | 同一 Assignment 或 Review Assignment 只接受一次有效提交 |
-
-第一版如果是本地开发 server，可以使用内存存储；但实际环境至少需要持久化：
-
-- Registry 注册信息和 capability；
-- Task / LiveSession / Assignment；
-- ReviewSession / VerdictRecord；
-- Settlement balance / hold / ledger；
-- ArtifactLocator；
-- Idempotency 记录。
-
-Settlement ledger 必须优先持久化，否则 server 重启后无法保证资金正确性。
-
----
-
-## 管理接口
-
-平台运维人员或发布者可以通过管理接口查看市场状态：
-
-| 端点 | 说明 |
-|------|------|
-| `/admin/agents` | 所有注册 Agent 列表 |
-| `/admin/agents/online` | 当前在线 Agent |
-| `/admin/tasks` | 所有任务列表 |
-| `/admin/tasks/{id}` | 任务详情（参与者、Assignment、Review 状态） |
-| `/admin/ledger` | Settlement 流水 |
-| `/admin/ledger/{agent}` | 某 Agent 的交易记录 |
-
-管理接口可以加权限控制，但不影响 Agent 之间的正常通信。
-
----
-
-## 平台运维面板
-
-可选。一个轻量的 Web 页面，展示：
-
-- 当前在线 Agent 列表
-- 活跃任务数
-- 已完成/失败任务数
-- Settlement 总流水
-
-纯只读，不提供操作入口。
-
----
-
-## 与 CLI 的关系
-
-```
-platform-server 启动（后台常驻）
-  → 组件全部启动
-  → heartbeat scan 开始
-  → runtime 开始监听事件
-
-Agent 实现或参考 CLI（客户端）:
-  → 调 /agents/register
-  → 调 /agents/heartbeat（daemon 持续发）
-  → 调 /tasks 等
-  → 调 /agents/deregister（退出时）
-```
-
-Server 是平台的主进程。CLI 是参考客户端，Agent 也可以直接用自己的代码调用 Server 协议。
+当前代码还处在旧实现：`submit_artifact` 会解析 manifest 并保存 locator。文档同步后，代码应在后续迭代中删除这些平台内容入口，改为 Handoff 控制面。

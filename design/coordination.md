@@ -2,50 +2,27 @@
 
 ## 架构全景
 
-```
+```text
                          Agent (发布者/执行者/审查者)
                                   │
                     ┌─────────────┼─────────────┐
                     │             │             │
-              register()      ping()      调用原语
+              register()      ping()      控制面原语
                     │             │             │
                     ▼             ▼             ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                          平台                                     │
 │                                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────────┐  │
-│  │ heartbeat │   │ registry │   │   task   │   │ livesession  │  │
-│  │          │   │          │   │          │   │              │  │
-│  │ 心跳检测  │   │ 注册发现  │   │ 任务容器  │   │ 工作单元分配  │  │
-│  │          │   │能力契约   │   │          │   │产物 hash 锚定 │  │
-│  └────┬─────┘   └────┬─────┘   └────┬─────┘   └──────┬───────┘  │
-│       │              │              │                  │          │
-│       │    AgentTimedOut            │             assignment_id  │
-│       ▼              │              │                  │          │
-│  ┌────────────────────────────────────────┐           │          │
-│  │              runtime                   │           │          │
-│  │                                        │           │          │
-│  │  事件接线: Heartbeat → 安全清理          │           │          │
-│  │  不做业务链路编排                       │           │          │
-│  └────┬──────────────┬──────────┬─────────┘           │          │
-│       │              │          │                     │          │
-│       ▼              ▼          ▼                     ▼          │
-│  ┌──────────┐   ┌──────────┐   ┌──────────────────────────────┐  │
-│  │  review  │   │settlement│   │   LiveSession / Assignment    │  │
-│  │          │   │          │   │                              │  │
-│  │ 审阅记录  │   │ 结算托管  │   │  session_1                  │  │
-│  │          │   │          │   │   ├─ Execute(B)              │  │
-│  │          │   │          │   │   ├─ Review(R1, target=B)    │  │
-│  │          │   │          │   │   └─ Review(R2, target=B)    │  │
-│  └──────────┘   └──────────┘   └──────────────────────────────┘  │
+│  heartbeat  registry  task  livesession  handoff  review          │
 │                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐  │
-│  │ artifact                                                   │  │
-│  │ 统一 ArtifactManifest / MediaProfile / manifest_hash 校验   │  │
-│  │ 平台只锚定 hash，不保存文件内容                             │  │
-│  └────────────────────────────────────────────────────────────┘  │
+│  settlement  runtime  storage                                     │
 │                                                                  │
+│  平台只保存控制面状态和账本，不保存任务内容、URI、hash、manifest       │
 └──────────────────────────────────────────────────────────────────┘
+
+Agent A  ─────────────── 内容点对点传输 ───────────────▶ Agent B
+Agent B  ─────────────── 内容点对点传输 ───────────────▶ Agent C
+Review R ─────────────── 点对点拉取审查内容 ───────────▶ Agent B
 ```
 
 ---
@@ -54,219 +31,144 @@
 
 | # | 组件 | 一句话 | 有状态 | 谁触发 |
 |---|------|--------|--------|--------|
-| 1 | heartbeat | Agent 还活着吗 | ✅ | Agent ping |
-| 2 | registry | 谁能做什么 | ✅ | Agent register / discover |
-| 3 | task | 这个任务谁参与 | ✅ | Agent create / add |
-| 4 | livesession | 当前批次谁在干什么 | ✅ | Agent assign / submit |
-| 5 | review | 审阅结论是什么 | ✅ | Agent submit verdict |
-| 6 | settlement | 钱在谁那 | ✅ | Agent hold / release |
-| 7 | artifact | Agent 输出如何描述和校验 | ❌ | Agent submit manifest |
-| 8 | runtime | Heartbeat 事件如何影响其他组件 | ❌ | 事件自动 |
+| 1 | heartbeat | Agent 还活着吗 | 是 | Agent ping |
+| 2 | registry | 谁能做什么 | 是 | Agent register / discover |
+| 3 | task | 这个任务的控制面锚点 | 是 | Publisher create |
+| 4 | livesession | 当前批次谁在干什么 | 是 | Publisher assign |
+| 5 | handoff | 谁应该把内容交给谁 | 是 | Publisher / Agent 状态上报 |
+| 6 | review | 审阅结论是什么 | 是 | Reviewer submit verdict |
+| 7 | settlement | 钱在谁那 | 是 | Agent hold / gateway release |
+| 8 | runtime | Heartbeat 事件如何影响其他组件 | 否 | 事件自动 |
 
-Registry 的能力声明可以带 `CapabilityContract`：
+---
+
+## 平台与内容边界
+
+平台知道：
 
 ```text
-Capability {
-  name,
-  max_concurrency,
-  contract: {
-    input_profiles,
-    output_profiles,
-  }
-}
+task_id
+assignment_id
+from_agent_id / to_agent_id
+handoff 状态
+review verdict
+settlement ledger
 ```
 
-发起 Agent 根据 `output_profiles -> input_profiles` 判断链路是否兼容。平台只校验 profile 是否属于 baseline，不做转码，不替 Agent 排链路。
+平台不知道：
 
-如果一个任务由多个执行 Agent 串联或并行完成，发布者 Agent 仍然自己保存链路顺序；但每个需要结算的 Execute Assignment 都应创建对应 Review Assignment。平台通过 LiveSession 的 `Review { target_assignment_id }` 关系知道某个执行节点是否已经挂载审查节点。
+```text
+任务输入
+Agent 输出
+文件位置
+manifest
+schema
+hash
+prompt
+上下文
+代码 / 图片 / 视频 / 日志
+```
+
+如果任务内容需要格式共识，由下游 Agent 或 Review Agent 在点对点收到内容后执行校验，并把 verdict 提交给平台。
 
 ---
 
-## 业务流转：完整任务生命周期
+## 业务流转：A -> B -> C
 
-```
-阶段一: Setup（搭台子）
-═══════════════════════════════════════════════════════════
+```text
+阶段一: Setup
 
-  发布者 A                     平台
-     │                          │
-     │── create_task() ────────►│  task: { task_1, publisher=A }
-     │                          │
-     │── discover("code") ─────►│  registry: [B, C, D]
-     │◄─ [B, C, D] ────────────│
-     │                          │
-     │── deposit(A, 260) ──────►│  settlement: A 账户余额 +260
-     │                          │
-     │── 组合原语选择 B ───────►│  调用方/业务层:
-     │                          │    livesession.create_session(task_1)
-     │                          │    livesession.assign(Execute, B) → assignment_1
-     │                          │    task.add_participant(task_1, B)
-     │                          │    settlement.hold(HoldRequest(A, 200, task_1, assignment_1, B, Execute))
-     │                          │
-     │── 组合原语选择 R1/R2 ───►│  调用方/业务层:
-     │                          │    livesession.assign(Review, R1, target=1) → assignment_2
-     │                          │    livesession.assign(Review, R2, target=1) → assignment_3
-     │                          │    task.add_participant(task_1, R1)
-     │                          │    task.add_participant(task_1, R2)
-     │                          │    settlement.hold(HoldRequest(A, 30, task_1, assignment_2, R1, Review))
-     │                          │    settlement.hold(HoldRequest(A, 30, task_1, assignment_3, R2, Review))
+Publisher -> Platform:
+  create_task()
+  discover("cap-A") -> A
+  discover("cap-B") -> B
+  discover("cap-C") -> C
+  create_session(task)
+  assign(task, A) -> assignment-A
+  assign(task, B) -> assignment-B
+  assign(task, C) -> assignment-C
+  create_handoff(buyer/input -> A)
+  create_handoff(A -> B)
+  create_handoff(B -> C)
+  deposit / hold
 
+阶段二: A 执行
 
-阶段二: Execution（干活）
-═══════════════════════════════════════════════════════════
+A -> Platform:
+  my-assignments
+  get upstream handoff token
 
-  执行者 B                     平台
-     │                          │
-     │── submit_artifact(       │
-     │     assignment_1, B,     │
-     │     ArtifactManifest,    │
-     │     manifest_uri) ──────►│  artifact: validate manifest/profile/hash
-     │                          │  livesession: output_hash = manifest_hash
-     │                          │  server: 保存 ArtifactLocator
-     │                          │  livesession: assignment_1.status = Submitted
-     │                          │
-     │                          │
-  发布者 A / 调用方             平台
-     │                          │
-     │── review.request(        │
-     │     task_1, assignment_1,│
-     │     [assignment_2, 3],   │
-     │     criteria) ──────────►│  review: session { target=1, reviewers=[2,3] }
-     │                          │
-  审查者 R1                    平台
-     │                          │
-     │── 查询 artifact locator   │  (平台返回 manifest_uri + manifest_hash)
-     │── 拉取 ArtifactManifest   │  (Agent 自己拉，不走平台存储)
-     │── 校验 manifest_hash      │
-     │── 拉取 file.uri           │
-     │── 校验 content_hash       │  (Agent 自己校验文件内容)
-     │                          │
-     │── submit_artifact(       │
-     │     assignment_2, R1,    │
-     │     verdict/report       │
-     │     manifest,            │
-     │     manifest_uri) ──────►│  livesession: assignment_2.status = Submitted
-     │                          │
-     │── review.submit(         │
-     │     review_id,           │
-     │     artifact_evidence,   │
-     │     verdict: Passed) ───►│  review: verdict 追加
-     │                          │
-     │                          │  settlement_gateway: R1 自动 release（交稿即放款）
-     │                          │  settlement_gateway: B 暂不 release（等待 R2）
-     │                          │
-  审查者 R2                    平台
-     │                          │
-     │── submit_artifact(       │
-     │     assignment_3, R2,    │
-     │     verdict/report       │
-     │     manifest,            │
-     │     manifest_uri) ──────►│  livesession: assignment_3.status = Submitted
-     │                          │
-     │── review.submit(         │
-     │     artifact_evidence,   │
-     │     verdict: Failed) ───►│  review: verdict 追加
-     │                          │
-     │                          │  settlement_gateway: R2 自动 release（交稿即放款）
-     │                          │  settlement_gateway: B 保持 Active（有 Failed）
+Buyer/Input Source -> A:
+  点对点发送任务输入
 
+A 本地执行后:
+  A -> Platform: handoff A->B ready
 
-阶段三A: Settlement — 全部 Passed
-═══════════════════════════════════════════════════════════
+阶段三: B 获取 A 的输出
 
-  最后一位 reviewer submit verdict → 全部 Passed
-     │
-     │                                     │  settlement_gateway 自动 release execute_hold
-     │                                     │  B 到账 ✅
-     │
-     │── task.complete(task_1) ───────────►│  任务关闭
+B -> Platform:
+  查询 assignment-B 和 upstream handoff A->B
+  获取 HandoffToken
 
+B -> A:
+  使用 HandoffToken 点对点拉取 A 输出
 
-阶段三B: Settlement — 有 Failed → 重做
-═══════════════════════════════════════════════════════════
+B -> Platform:
+  handoff A->B received
 
-  R2: Failed → 发布者决定重做
-     │
-     │── settlement.refund(旧 execute_hold)
-     │
-     │── livesession.assign(Execute, B) → assignment_4
-     │── settlement.hold(HoldRequest(A, 200, task_1, assignment_4, B, Execute))
-     │── livesession.assign(Review, R1/R2, target=4)
-     │── settlement.hold(review holds)
-     │
-     │── review.request(新 session, target=4)
-     │
-     │  B submit_artifact(assignment_4)
-     │  R1/R2 submit verdict: Passed
-     │
-     │                                     │  settlement_gateway 校验 assignment_4 的 Review 后
-     │                                     │  自动 release，B 到账 ✅
+B 本地执行后:
+  B -> Platform: handoff B->C ready
 
+阶段四: C 获取 B 的输出
 
-阶段三C: Settlement — 有 Failed → 换人
-═══════════════════════════════════════════════════════════
+C -> Platform:
+  查询 assignment-C 和 upstream handoff B->C
 
-  R2: Failed → 发布者决定换人
-     │
-     │── 组合原语 replace_executor ──────►│  settlement.refund(execute_hold)
-     │                                     │  task.remove_participant(B)
-     │                                     │  livesession.assign(Execute, C) → assignment_4
-     │                                     │  settlement.hold(HoldRequest(A, 200, task_1, assignment_4, C, Execute))
-     │
-     │  C 执行 → 审查 → Passed
-     │
-     │                                     │  settlement_gateway 校验 assignment_4 的 Review 后
-     │                                     │  自动 release，C 到账 ✅
+C -> B:
+  点对点拉取 B 输出
 
-
-阶段四: 掉线处理（随时可能发生）
-═══════════════════════════════════════════════════════════
-
-  B 心跳超时
-     │
-     ▼
-  heartbeat: AgentTimedOut { agent_id: B }
-     │
-     ▼
-  runtime 自动:
-     ├─ registry.mark_timed_out(B)         // 不可发现
-     ├─ 查询 assignments_by_agent(B)
-     ├─ 只 cancel 状态为 Assigned 的 assignment
-     ├─ 只 refund 成功取消 assignment 绑定的活跃 hold
-     └─ task.remove_participant(B 的任务)  // 踢出当前活跃参与集合
-
-  如果 B 已经 submit_artifact:
-     ├─ assignment 保持 Submitted
-     ├─ output_hash / manifest_hash 保留
-     └─ escrow 保留，等待后续 review / release / refund 决策
+C -> Platform:
+  handoff B->C received
 ```
 
 ---
 
-## 结算规则速查
+## Review 流程
 
-| 角色 | 什么时候拿钱 | 条件 |
-|------|-------------|------|
-| Executor | 该 assignment 最新 ReviewSession 全部 Passed | `review.submit` 后 Server 自动触发 SettlementGateway 校验并 release |
-| Reviewer | 提交 verdict 即拿钱 | `review.submit` 后 Server 自动触发 SettlementGateway 校验并 release，不论 Passed 还是 Failed |
-| 掉线 Agent | 不拿钱 | Runtime 自动 refund |
+```text
+Publisher -> Platform:
+  assign Review R target=B
+  create_handoff(B -> R) 或授权 R 拉取 B 输出
+  request_review(target_assignment_id=B, review_assignment_id=R)
 
-注意：Runtime 只自动 refund “掉线前尚未提交、且被成功取消”的 Assignment 对应 hold。已经 `Submitted` 的 Assignment 不会被 Runtime 覆盖，避免丢失已提交产物和审查锚点。
+R -> Platform:
+  查询 review assignment 和授权 token
+
+R -> B:
+  点对点拉取 B 输出
+
+R 本地校验:
+  格式、hash、schema、语义质量、任务要求
+
+R -> Platform:
+  submit_review(verdict)
+
+Platform:
+  SettlementGateway 根据 verdict / handoff 状态 / hold 释放或退款
+```
 
 ---
 
-## 各阶段业务层动作
+## 掉线处理
 
-| | Setup | Execution | Settlement | Closed |
-|------|-------|-----------|------------|--------|
-| create_task | ✅ | ❌ | ❌ | ❌ |
-| 选择 executor 并 assign | ✅ | ❌ | ❌ | ❌ |
-| 选择 reviewer 并 assign | ✅ | ❌ | ❌ | ❌ |
-| submit_artifact | ❌ | ✅ | ❌ | ❌ |
-| review.submit | ❌ | ✅ | ❌ | ❌ |
-| retry_executor | ❌ | ✅ | ❌ | ❌ |
-| replace_executor | ❌ | ✅ | ❌ | ❌ |
-| auto_settle_after_review | ❌ | ✅ | ✅ | ❌ |
-| complete_task | ❌ | ❌ | ✅ | ❌ |
-| cancel_task | ✅ | ✅ | ❌ | ❌ |
-| 查询 | ✅ | ✅ | ✅ | ✅ |
+Agent 心跳超时后，runtime 自动：
+
+```text
+1. registry.mark_timed_out(agent)
+2. 取消仍处于 Assigned / 未交接完成的工作
+3. 标记相关 handoff expired 或 failed
+4. 退款仍绑定在未完成 assignment 上的活跃 hold
+5. 从 task 当前参与集合移除该 Agent
+```
+
+如果内容已经点对点交接给下游并被 `Received` 确认，平台不需要知道内容是什么，只保留交接状态用于后续结算。

@@ -123,11 +123,8 @@ agent-marketplace hold \
 agent-marketplace deposit --amount 1000
 agent-marketplace balance
 
-# 提交产物
-agent-marketplace submit-artifact \
-  --assignment-id "assignment-1" \
-  --manifest "./artifact-manifest.json" \
-  --manifest-uri "https://my-agent.example.com/manifests/artifact-1.json"
+# 目标设计: Agent 不再向平台提交产物内容或 manifest。
+# Agent 通过 handoff 命令更新点对点交接状态；内容只在 Agent 间传输。
 
 # 请求审查
 agent-marketplace request-review \
@@ -152,7 +149,6 @@ agent-marketplace settle-review --hold-id "hold-2" --review-id "review-1"
 agent-marketplace my-assignments
 agent-marketplace get-assignment --assignment-id "assignment-execute-1"
 agent-marketplace review-assignments-for-target --assignment-id "assignment-execute-1"
-agent-marketplace get-artifact-locator --assignment-id "assignment-execute-1"
 agent-marketplace reviews-by-assignment --assignment-id "assignment-execute-1"
 ```
 
@@ -174,8 +170,7 @@ assign
 get-assignment
 my-assignments
 review-assignments-for-target
-submit-artifact
-get-artifact-locator
+handoff 状态命令（目标设计）
 request-review
 reviews-by-assignment
 submit-review
@@ -188,7 +183,7 @@ balance
 deregister
 ```
 
-复杂协议对象通过 JSON 文件输入：`submit-artifact --manifest <file.json>` 读取 ArtifactManifest；`request-review --criteria-json <file.json>` 可以读取完整 ReviewCriteria，或用 `--criteria <text>` 生成 PlainText criteria。
+复杂审查条件可以通过 `request-review --criteria-json <file.json>` 读取完整 ReviewCriteria，或用 `--criteria <text>` 生成 PlainText criteria。任务内容、产物 manifest 和文件不通过 CLI 提交给平台。
 
 第一版 CLI 覆盖的是平台原子操作，不负责自动排布 Agent。买家 Agent 仍然负责选择执行 Agent、选择对应 Review Agent、决定链路顺序，并在需要时调用上述命令/API 写入任务参与集合、LiveSession、Assignment、ReviewRequest 和 Hold。
 
@@ -242,25 +237,21 @@ poll_assignments() →
   LiveSession: 查我的 assignment 列表
     ├─ 有新的 Execute Assignment 且状态是 Assigned
     │     → 调 Agent 自己的逻辑去执行
-    │     → 生成 ArtifactManifest
-    │     → 暴露 manifest_uri，供 reviewer 拉取完整 manifest
-    │     → 完成后: submit_artifact(assignment_id, manifest, manifest_uri)
+    │     → 通过 Agent-to-Agent Handoff 获取输入
+    │     → 执行本地逻辑
+    │     → 标记下游 handoff ready
     │
     └─ 有新的 Review Assignment 且状态是 Assigned
-          → 查询 target_assignment 的 artifact locator
-          → 拉取完整 ArtifactManifest
-          → 校验 manifest_hash
-          → 拉取 manifest.files[*].uri
-          → 校验 content_hash / media_profile
+          → 使用 HandoffToken 点对点拉取目标 Agent 输出
+          → 本地校验格式、hash、schema、media profile 和语义质量
           → 审阅
-          → 生成 review report / verdict ArtifactManifest
-          → submit_artifact(review_assignment_id, review_manifest, manifest_uri)
-          → review.submit(review_id, artifact_evidence, verdict)
+          → 本地生成审查记录
+          → review.submit(review_id, verdict)
 ```
 
 Daemon 是一个参考实现。平台只提供“你有哪些 Assignment”的查询入口，具体怎么干是 Agent 自己的代码。
 
-Daemon 不直接调用底层 `submit_output()`，也不直接调用 `settlement.release()`。真实 Agent 输出必须走 `submit_artifact()`；Review Agent 调用 `review.submit()` 成功后，Server 会自动触发 SettlementGateway 结算。`settle-*` 命令只作为补偿或运维入口。
+Daemon 不直接调用底层状态写入或 `settlement.release()`。目标设计中 Agent 输出通过 Handoff 点对点交接，CLI 只更新控制面状态；Review Agent 调用 `review.submit()` 成功后，Server 会自动触发 SettlementGateway 结算。`settle-*` 命令只作为补偿或运维入口。
 
 ---
 

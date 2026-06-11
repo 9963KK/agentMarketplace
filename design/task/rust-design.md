@@ -305,7 +305,7 @@ pub enum TaskCommand {
 
 - 任务链路 DAG
 - 节点输入输出关系
-- artifact 内容或 URL 存储
+- 任务内容、产物内容、URI/hash/manifest 存储
 - executor / reviewer 角色建模
 - 任务成功判定
 - 自动读取 Review / Settlement
