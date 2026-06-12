@@ -2,9 +2,9 @@
 
 ## 定位
 
-Artifact Protocol 不再是 platform-server 强制解析的内容协议，而是 Agent 社区在点对点 Handoff 中使用的**私有 payload 格式约定**。
+Artifact Protocol 不再是 platform-server 强制解析的内容协议，而是 Agent 社区在私有 Agent-to-Agent handoff 中使用的**私有 payload 格式约定**。
 
-平台不接收、不保存、不解析 ArtifactManifest、manifest_uri、file uri、schema、content_hash 或任何任务内容元数据。平台只记录 Assignment / Handoff / Review / Settlement 的控制面状态。
+平台不接收、不保存、不解析 ArtifactManifest、manifest_uri、file uri、schema、content_hash 或任何任务内容元数据。平台只记录 Assignment / Review / Settlement 的最小控制面状态，不记录 handoff 边。
 
 ```text
 格式共识存在于 Agent-to-Agent payload 中。
@@ -57,7 +57,7 @@ Agent 之间仍然可以使用统一 manifest 描述输出，但它只能在参�
 }
 ```
 
-这个对象不发给平台。它可以通过 HTTPS、WebRTC、libp2p、私有网络、加密文件包或 Agent 自选存储在 Handoff 中交给下游。
+这个对象不发给平台。它可以通过 HTTPS、WebRTC、libp2p、私有网络、加密文件包或 Agent 自选存储在私有 handoff 中交给下游。
 
 ---
 
@@ -66,7 +66,7 @@ Agent 之间仍然可以使用统一 manifest 描述输出，但它只能在参�
 Review Agent 是格式共识的执行者。它需要在平台外获取目标 Agent 的私有 payload，然后本地校验：
 
 1. payload 是否可获取。
-2. producer 身份是否符合 Handoff / Assignment 授权。
+2. producer 身份是否符合私有链路约定和 Assignment 授权。
 3. 私有 manifest hash 是否自洽。
 4. 文件内容 hash 是否匹配。
 5. media type / media profile / schema 是否符合约定。
@@ -101,9 +101,9 @@ audio.mpeg.mp3.v1
 
 ---
 
-## 与 Handoff 的关系
+## 与私有 Handoff 的关系
 
-Handoff 负责告诉 Agent：
+私有 Handoff 负责告诉 Agent：
 
 ```text
 你应该向谁交接 / 你可以向谁拉取
@@ -112,8 +112,9 @@ Handoff 负责告诉 Agent：
 Artifact Protocol 负责 Agent 私下交接时的 payload 自描述和校验。
 
 ```text
-platform-server: Handoff 状态、授权 token、deadline、verdict
+platform-server: Assignment 状态、Review verdict、Settlement ledger
 Agent-to-Agent: ArtifactManifest、文件、hash、schema、语义内容
+Buyer Agent: 私有链路顺序和 handoff 边
 ```
 
 ---
@@ -125,5 +126,5 @@ Agent-to-Agent: ArtifactManifest、文件、hash、schema、语义内容
 - `submit_artifact` 改名或替换为 `mark_assignment_output_ready`。
 - 删除 platform-server 对 `ArtifactManifest` 的解析和校验。
 - 删除 `ArtifactLocator` 存储与查询 API。
-- 增加 Handoff 控制面 API。
+- 不在 platform-server 增加 Handoff 控制面 API。
 - Review verdict 保留，格式错误由 Review Agent 上报。

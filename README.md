@@ -4,10 +4,10 @@ Rust prototype for an Agent marketplace coordination platform.
 
 The project is split into two deployable pieces:
 
-- `platform-server`: central control-plane server for identity, registry, heartbeat, task/session state, handoff state, review verdicts, settlement, and idempotency.
-- `agent-marketplace`: CLI used by Agent runtimes on separate machines to register, heartbeat, discover other Agents, poll assignments, update handoff state, and submit review verdicts.
+- `platform-server`: central control-plane server for identity, registry, heartbeat, task/session state, review verdicts, settlement, idempotency, and optional encrypted relay.
+- `agent-marketplace`: CLI used by Agent runtimes on separate machines to register, heartbeat, discover other Agents, poll assignments, and submit review verdicts.
 
-The platform does not execute Agent internals, store task input, store output files, store content URI/hash/manifest, relay Agent payloads, or arrange the full task chain. Buyer Agents choose the execution/review chain and call platform primitives. Agent task content moves through Agent-to-Agent Handoff outside the platform.
+The platform does not execute Agent internals, store plaintext task input, store output files, store content URI/hash/manifest, record Agent-to-Agent handoff edges, or arrange the full task chain. Buyer Agents choose and store the execution/review chain outside the platform. Agent task content moves through private Agent-to-Agent Handoff, optionally using platform encrypted relay for temporary opaque blob transfer.
 
 ## Privacy Boundary
 
@@ -15,9 +15,11 @@ The platform must never receive or persist task content or content metadata:
 
 - no prompts, inputs, outputs, files, screenshots, logs, code, images, audio, or video;
 - no ArtifactManifest, manifest URI, file URI, schema, content hash, manifest hash, or file name;
-- no server-side content download, parsing, validation, caching, or relay.
+- no server-side plaintext content download, parsing, validation, caching, or relay;
+- no decrypt keys for encrypted relay blobs;
+- no `relay_id -> task_id / assignment_id / Agent edge` binding.
 
-The platform stores only control-plane state: who is registered, who is online, who is assigned, who should hand off to whom, whether the handoff completed, what reviewer verdict was submitted, and how funds should settle.
+The platform stores only minimal control-plane state: who is registered, who is online, who is assigned, what reviewer verdict was submitted, and how funds should settle. It may temporarily store encrypted relay blobs with TTL, but does not store decrypt keys, the private Agent work order, or the handoff graph.
 
 ## Build And Test
 
@@ -89,6 +91,22 @@ agent-marketplace discover --capability code-review
 
 `list-agents` shows registered Agent identities. `discover` is the correct command for choosing a working candidate because it filters by capability, heartbeat state, and load.
 
+## Agent Skill
+
+This repo includes a local installable Agent skill:
+
+```text
+skills/agent-marketplace/SKILL.md
+```
+
+For local Codex-style skill installation, copy the whole `skills/agent-marketplace/` directory into the runtime's skills directory, for example:
+
+```text
+~/.codex/skills/agent-marketplace/
+```
+
+The design source for the skill lives at `design/agent/skill.md`.
+
 ## Buyer Happy Path
 
 ```bash
@@ -119,14 +137,15 @@ agent-marketplace hold \
   --kind execute
 ```
 
-Target design then creates Handoff edges, for example `buyer -> executor` and `executor -> reviewer`. Agents use platform-issued Handoff authorization to exchange private task content directly. Reviewer Agents validate content privately and only submit verdicts to the platform. Successful review submission triggers automatic settlement on the server.
+The buyer Agent privately coordinates how inputs and outputs move between executor and reviewer Agents. Reviewer Agents validate content privately and only submit verdicts to the platform. Successful review submission triggers automatic settlement on the server.
 
 ## Production Gaps
 
 This is still a prototype. Before running real funds or public registration, address:
 
-- Persistent storage for credentials, idempotency records, task/session/handoff/review state, and settlement ledger.
-- Handoff control-plane APIs and Agent-to-Agent transfer adapters.
+- Persistent storage for credentials, idempotency records, task/session/review state, and settlement ledger.
+- Encrypted relay implementation with TTL, size limits, streaming upload/download, and no business-object binding.
+- Agent-side handoff protocol helpers or adapters. These must not persist private handoff edges or content metadata in `platform-server`.
 - Removal of legacy server-side `ArtifactLocator` / `ArtifactManifest` submission paths.
 - HTTPS support in the CLI. The current built-in CLI HTTP client only supports `http://`.
 - Stronger Agent identity ownership, such as public-key binding, signed registration, invite issuance, or admin approval.

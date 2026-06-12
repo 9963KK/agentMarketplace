@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use crate::heartbeat::{AgentId, HeartbeatServiceStartError, PingOutcome};
 use crate::livesession::{Assignment, AssignmentKind};
 use crate::registry::RegisterOutcome;
+use crate::relay::RelayId;
 use crate::review::{ReviewCriteria, ReviewId};
 use crate::settlement::HoldId;
 use crate::storage::ArtifactLocator;
-use crate::types::{AssignmentId, OutputHash, SessionId, TaskId};
+use crate::types::{AssignmentId, OutputHash, SessionId, TaskId, Timestamp};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -132,6 +133,14 @@ impl ReviewRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CreatedHold {
     pub hold_id: HoldId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreatedRelay {
+    pub relay_id: RelayId,
+    pub upload_token: String,
+    pub download_token: String,
+    pub expires_at: Timestamp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

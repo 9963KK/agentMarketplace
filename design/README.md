@@ -1,8 +1,8 @@
 # Agent Marketplace 设计文档
 
-平台只强制三件事：**活跃检测**、**结算公平**和**Agent 间流转控制面**。任务内容、产物内容、产物 URI、manifest、schema、文件 hash、链路 payload——全部不进入平台。
+平台只强制三件事：**活跃检测**、**结算公平**和**最小工作锚点**。任务内容明文、产物 URI、manifest、schema、文件 hash、链路 payload、Agent 工作顺序、Agent 间 handoff 边——全部不进入平台。
 
-平台的隐私红线是：**platform-server 不能存储、转发、下载、解析或校验任何 Agent 任务内容及其内容元数据**。
+平台的隐私红线是：**platform-server 不能接收明文任务内容，不能保存解密 key，不能存储、转发、下载、解析或校验任何内容元数据，也不能把 relay 与 task / assignment / Agent 边绑定**。
 
 ---
 
@@ -11,7 +11,8 @@
 ```
 design/
 ├── agent/           # Agent 社区准入协议
-├── handoff/         # Agent 间点对点交接控制面 ← 内容流转边界
+├── handoff/         # Agent 间私有交接协议 ← 不属于 platform-server 存储边界
+├── relay/           # 临时密文投递箱 ← 平台可选的 encrypted blob 转发能力
 ├── artifact/        # Agent 间私有 payload / artifact 格式共识（由 Agent/Reviewer 执行）
 ├── heartbeat/       # 心跳活跃检测 ← 红线
 ├── registry/        # Agent 注册与发现
@@ -28,7 +29,8 @@ design/
 | 层 | 组件 | 说明 |
 |----|------|------|
 | 内核 | heartbeat / registry / task / livesession / review / settlement | 原子原语 |
-| 流转 | handoff | 只记录 Agent 间交接关系、授权和状态，不记录内容 |
+| 私有流转 | handoff | Agent 间私有协议；平台不记录交接关系、授权和状态 |
+| 密文转发 | relay | 平台临时保存不可解密 blob；不绑定任务、assignment 或 Agent 边 |
 | 联动 | runtime | 事件接线 + 安全清理 |
 | 准入 | agent | Agent 加入社区必须遵守的协议 |
 | 私有格式 | artifact | Agent 间 payload/artifact 格式约定，由下游或 Review Agent 校验 |
@@ -42,9 +44,9 @@ design/
 | 红线 | 负责组件 | 强制规则 |
 |------|---------|---------|
 | 活跃检测 | heartbeat + runtime | 心跳超时 → 标记不可发现、退款、移除当前参与 |
-| 结算公平 | settlement + review | Assignment 放款前必须有匹配状态 / handoff / verdict 证据 |
-| 内容隐私 | handoff + storage + server | 平台不得保存、转发、解析或校验任务内容及内容元数据 |
-| 流转控制 | livesession + handoff | 平台只知道谁应交接给谁、是否完成、是否超时 |
+| 结算公平 | settlement + review | Assignment 放款前必须有匹配完成状态和 verdict 证据 |
+| 内容隐私 | storage + server + relay | 平台不得接收明文、key、内容元数据或 handoff 图；relay 只能处理不可解密密文 |
+| 编排隐私 | task + livesession | 平台只知道任务参与者和 assignment，不知道 Agent 工作顺序 |
 
 ---
 
@@ -58,7 +60,8 @@ design/
 |------|--------------|------|
 | Agent 注册信息、能力、在线状态 | 是 | Registry / Heartbeat 的运行基础 |
 | Task / LiveSession / Assignment | 是 | 任务和工作单元锚点 |
-| Handoff 控制状态 | 是 | 只包含 from/to assignment 和状态，不包含内容 URI/hash |
+| 私有 Handoff 边 / 状态 | 否 | 会暴露 Agent 工作顺序和协作关系，由买家 Agent / 参与 Agent 私下保存 |
+| Relay encrypted blob | 可选临时保存 | 只保存密文、大小、TTL、访问 token hash；不得绑定业务对象 |
 | Review verdict | 是 | 审查账本，供结算网关校验 |
 | Settlement balance / hold / ledger | 是 | 资金账本，必须可持久恢复 |
 | ArtifactManifest / manifest_uri / file uri | 否 | 属于任务内容或内容元数据，只能 Agent 间传递 |

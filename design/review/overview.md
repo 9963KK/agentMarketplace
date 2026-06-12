@@ -10,7 +10,7 @@
 | 审查绑定 Assignment | verdict 必须指向 `target_assignment_id` |
 | 审查工作也有 Assignment | reviewer 自己的工作由 `review_assignment_id` 表达 |
 | 裁决只追加不可改 | 一旦 submit，不可覆盖 |
-| 内容私下获取 | Review Agent 通过 Handoff 或目标 Agent 的私有接口拉取内容 |
+| 内容私下获取 | Review Agent 通过买家 Agent 或目标 Agent 的私有接口拉取内容 |
 | Failed = 重做信号 | 执行 Assignment 的 hold 不解冻，发布者决定重做或换人 |
 
 ## 与 Chain 的关系

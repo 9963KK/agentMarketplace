@@ -23,9 +23,28 @@ fn empty_request(method: &str, uri: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn bytes_request(method: &str, uri: &str, body: Vec<u8>) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .body(Body::from(body))
+        .unwrap()
+}
+
 async fn response_json(response: axum::response::Response) -> Value {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
+async fn response_bytes(response: axum::response::Response) -> Vec<u8> {
+    response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
 }
 
 async fn register(
@@ -180,6 +199,100 @@ async fn write_operations_require_idempotency_key() {
         response_json(response).await["error"],
         "bad request: missing Idempotency-Key header"
     );
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_uploads_and_downloads_encrypted_bytes_without_agent_auth() {
+    let app = PlatformApp::spawn().unwrap();
+    let router = http::router(app.clone());
+
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/relay",
+            json!({
+                "size_bytes": 4,
+                "ttl_secs": 60,
+                "max_downloads": 1
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let created = response_json(response).await;
+    let relay_id = created["relay_id"].as_str().unwrap();
+    let upload_token = created["upload_token"].as_str().unwrap();
+    let download_token = created["download_token"].as_str().unwrap();
+    assert!(upload_token.starts_with("relay-token-"));
+    assert!(download_token.starts_with("relay-token-"));
+
+    let mut upload = bytes_request("PUT", &format!("/relay/{relay_id}"), vec![9, 8, 7, 6]);
+    upload
+        .headers_mut()
+        .insert("relay-token", upload_token.parse().unwrap());
+    let response = router.clone().oneshot(upload).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let metadata = response_json(response).await;
+    assert_eq!(metadata["status"], "Uploaded");
+
+    let mut download = empty_request("GET", &format!("/relay/{relay_id}"));
+    download
+        .headers_mut()
+        .insert("relay-token", download_token.parse().unwrap());
+    let response = router.clone().oneshot(download).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_bytes(response).await, vec![9, 8, 7, 6]);
+
+    let mut second_download = empty_request("GET", &format!("/relay/{relay_id}"));
+    second_download
+        .headers_mut()
+        .insert("relay-token", download_token.parse().unwrap());
+    let response = router.oneshot(second_download).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    app.shutdown().await;
+}
+
+#[tokio::test]
+async fn relay_rejects_missing_or_wrong_tokens() {
+    let app = PlatformApp::spawn().unwrap();
+    let router = http::router(app.clone());
+    let response = router
+        .clone()
+        .oneshot(json_request(
+            "POST",
+            "/relay",
+            json!({
+                "size_bytes": 2,
+                "ttl_secs": 60,
+                "max_downloads": 1
+            }),
+        ))
+        .await
+        .unwrap();
+    let created = response_json(response).await;
+    let relay_id = created["relay_id"].as_str().unwrap();
+
+    let response = router
+        .clone()
+        .oneshot(bytes_request(
+            "PUT",
+            &format!("/relay/{relay_id}"),
+            vec![1, 2],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut upload = bytes_request("PUT", &format!("/relay/{relay_id}"), vec![1, 2]);
+    upload
+        .headers_mut()
+        .insert("relay-token", "wrong-token".parse().unwrap());
+    let response = router.oneshot(upload).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     app.shutdown().await;
 }

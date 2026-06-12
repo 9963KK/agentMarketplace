@@ -131,9 +131,9 @@ Review 和 Settlement 可以保留 `TaskId` 作为任务维度索引，但结算
 
 | 不做 | 谁做 |
 |------|------|
-| 链路先后顺序 | 发起 Agent 通过 Assignment / Handoff 控制面管理 |
-| 任务输入 / 产物内容 | Agent-to-Agent Handoff 私下传输 |
+| 链路先后顺序 | 发起 Agent 私下管理 |
+| 任务输入 / 产物内容 | Agent-to-Agent 私下传输 |
 | 内容 URI/hash/manifest | Agent 私下传递，不进入平台 |
-| 节点输入输出关系 | Handoff 控制面记录 from/to，不记录内容 |
+| 节点输入输出关系 | 发起 Agent 私下保存，不进入平台 |
 | executor / reviewer 角色判断 | AssignmentKind 记录局部事实 |
 | 是否通过、是否返工 | 发布者自己判断 |

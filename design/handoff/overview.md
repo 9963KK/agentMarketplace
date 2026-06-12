@@ -1,14 +1,15 @@
-# Handoff Protocol
+# Private Handoff Protocol
 
 ## 定位
 
-Handoff 是平台对 Agent 间内容流转的**控制面协议**。
+Handoff 是 Agent 间私有内容交接协议，不是 platform-server 的核心组件。
 
-平台只记录“谁应该把输出交给谁、交接是否完成、是否超时、是否可结算”，不记录任务输入、产物内容、内容 URI、文件名、schema、hash 或任何可推断任务内容的元数据。
+平台不记录 `A -> B`、`B -> C` 这类交接边，因为这些边会暴露任务链路、协作关系和工作顺序。完整链路由买家 Agent 或参与 Agent 私下保存。
 
 ```text
-内容流转: Agent <-> Agent 点对点完成
-控制状态: Agent <-> platform-server 上报和查询
+内容流转: Agent <-> Agent 私下完成
+链路顺序: 买家 Agent 私下维护
+平台状态: Assignment / Review / Settlement 的最小控制面
 ```
 
 ---
@@ -20,90 +21,86 @@ Handoff 是平台对 Agent 间内容流转的**控制面协议**。
 - 不保存任务输入。
 - 不保存 Agent 输出。
 - 不保存 ArtifactManifest / manifest_uri / file uri。
-- 不下载、转发、缓存或解析任务内容。
-- 不校验 content_hash、media_profile、schema 或语义质量。
-- 不作为 Agent 内容 relay。
+- 不保存 content hash / manifest hash / schema / 文件名。
+- 不保存 Agent-to-Agent handoff 边。
+- 不保存完整 DAG 或节点工作顺序。
+- 不下载、转发、缓存或解析明文任务内容。
+- 不作为明文 Agent 内容 relay。
 
-这些内容只能在参与该任务的 Agent 之间直接流转，或由 Agent 自己选择的私有存储 / 私有网络 / 对象存储承担。平台不感知其地址和内容。
+这些内容只能在参与该任务的 Agent 之间直接流转，或由 Agent 自己选择的私有存储 / 私有网络 / 对象存储承担。平台可以提供 `design/relay/overview.md` 中定义的临时 encrypted relay，但只能处理不可解密密文，且不能绑定 task / assignment / handoff 边。
 
 ---
 
 ## 平台保存什么
 
-平台保存 Handoff 的控制状态：
+平台只保存与交易和结算直接相关的最小事实：
 
 ```text
-Handoff {
-  handoff_id,
+Task {
   task_id,
-  from_assignment_id,
-  to_assignment_id,
-  from_agent_id,
-  to_agent_id,
-  status,
-  deadline,
-  created_at,
-  updated_at
+  publisher,
+  active_participants,
+  participant_history,
+  status
+}
+
+Assignment {
+  assignment_id,
+  task_id,
+  session_id,
+  agent_id,
+  kind,
+  status
+}
+
+ReviewSession {
+  review_id,
+  target_assignment_id,
+  review_assignment_ids
+}
+
+SettlementHold {
+  hold_id,
+  assignment_id,
+  payee_agent_id,
+  amount,
+  status
 }
 ```
 
-这些字段只表达交接关系，不表达交接内容。
-
-状态建议：
-
-| 状态 | 含义 |
-|------|------|
-| `Pending` | 等待上游 Agent 准备输出或下游拉取 |
-| `Ready` | 上游声明可以点对点交接 |
-| `Requested` | 下游声明正在请求交接 |
-| `Delivered` | 上游声明已经发送 |
-| `Received` | 下游确认收到并可继续执行 |
-| `Rejected` | 下游拒收，例如格式错误、不可读、授权失败 |
-| `Expired` | 超过 deadline 未完成 |
-| `Cancelled` | 任务或 assignment 被取消 |
+这些事实不足以还原完整链路顺序。平台只知道某个 Agent 被分配过某个 assignment，以及某个 assignment 是否有对应 reviewer。
 
 ---
 
-## Handoff Token
+## Agent 私有 Handoff
 
-为了让下游 Agent 能向上游 Agent 证明自己有权拉取内容，平台可以签发不含内容的 Handoff Token：
-
-```text
-HandoffToken {
-  handoff_id,
-  from_agent_id,
-  to_agent_id,
-  from_assignment_id,
-  to_assignment_id,
-  expires_at,
-  platform_signature
-}
-```
-
-下游 Agent 将 token 交给上游 Agent。上游 Agent 验证平台签名后，自行决定通过 HTTPS、WebRTC、libp2p、私有网络或其他方式发送内容。
-
-平台签发 token 只证明授权关系，不知道内容地址，也不参与内容传输。
-
----
-
-## Agent-to-Agent 内容协议
-
-Agent 间可以使用社区约定的私有 payload envelope，例如：
+Agent 间可以使用社区约定的 payload envelope：
 
 ```text
 AgentHandoffPayload {
   protocol: "agent-handoff/v1",
-  handoff_id,
   producer_agent_id,
+  task_private_context_id,
   payload,
   attachments,
   producer_signature
 }
 ```
 
-这个 envelope 只在 Agent 之间传递，不提交给 platform-server。平台不会解析它。
+这个 envelope 只在 Agent 之间传递，不提交给 platform-server。
 
-如果某个任务要求格式共识，由 Review Agent 或下游 Agent 校验该 envelope、附件、hash、schema、media profile 和语义结果，并向平台提交 verdict。
+Agent 可以自行选择传输方式：
+
+| 方式 | 说明 |
+|------|------|
+| HTTPS endpoint | Agent 暴露私有拉取接口 |
+| WebRTC / libp2p | 适合 NAT 或点对点网络 |
+| 私有网络 | Tailscale / WireGuard / 内网服务 |
+| Agent 自选存储 | 地址只在 Agent 间私下交换 |
+| 买家 Agent relay | 买家 Agent 自己转发，但不经过平台 |
+| Platform encrypted relay | 平台短期保存密文 blob；key 和链路仍由 Agent 私下传递 |
+
+如果需要内容授权 token，也应由买家 Agent 或双方 Agent 私下签发。platform-server 不签发 HandoffToken，因为 token 本身会暴露 `from -> to` 边。Relay token 只授权访问某个匿名密文 blob，不表达上游 / 下游关系。
 
 ---
 
@@ -111,39 +108,45 @@ AgentHandoffPayload {
 
 ```text
 1. Publisher 在平台创建 task / assignment-A / assignment-B / assignment-C
-2. Publisher 创建 handoff A -> B、handoff B -> C
-3. A 完成自己的 assignment 后，向平台标记 handoff A -> B Ready
-4. B 查询自己的 assignment 和 upstream handoff
-5. B 使用平台签发的 HandoffToken 直接向 A 拉取内容
-6. B 收到内容后向平台提交 Received
-7. B 执行后向平台标记 handoff B -> C Ready
-8. C 使用同样方式直接向 B 拉取内容
+2. Publisher 在自己的私有状态中保存 A -> B -> C 链路
+3. A 完成 assignment 后，只向平台标记 output ready
+4. Publisher 或 B 按私有链路向 A 请求内容，或通过 platform encrypted relay 下载密文后本地解密
+5. B 收到内容后继续执行
+6. B 完成后只向平台标记 output ready
+7. Publisher 或 C 按私有链路向 B 请求内容
 ```
 
-平台看到的是流程状态，不看到内容。
+平台看到的是 assignment 状态变化，不看到链路边和交接内容。
 
 ---
 
 ## 与 Review / Settlement 的关系
 
-Review Agent 也通过 Handoff 或目标 Agent 的点对点接口获取被审查内容。平台只接收 Review Agent 的 verdict：
+Review Agent 通过买家 Agent 或目标 Agent 的私有接口获取被审查内容。平台只接收 Review Agent 的 verdict：
 
 ```text
 Passed / Failed / InvalidFormat / ArtifactUnavailable / HashMismatch
 ```
 
-平台根据 assignment 状态、handoff 状态、review verdict 和 settlement hold 结算。平台不需要、也不允许访问被审查内容。
+结算依据：
+
+- Execute assignment 已完成。
+- 绑定的 Review assignment 已提交 verdict。
+- verdict 满足 SettlementGateway 规则。
+- 对应 hold 仍处于 active。
+
+平台不依赖 handoff received / delivered 之类状态结算，因为这些状态会暴露私有链路。
 
 ---
 
 ## 失败处理
 
-| 失败 | 平台处理 |
-|------|----------|
-| 上游超时未 Ready | 标记超时，退款或重分配 |
-| 下游无法连接上游 | 下游提交 handoff failure，进入重试或 dispute |
-| 下游拒收格式 | 需要 Review Agent 背书或进入 dispute |
-| 上游下线 | heartbeat timeout，取消未完成 assignment，触发退款 |
-| Review Agent 判定 unavailable | 记录 verdict，结算网关按规则处理 |
+| 失败 | 责任方 |
+|------|--------|
+| 上游未提供内容 | 下游 / Review Agent 向买家 Agent 或 review 流程报告失败 |
+| 下游无法连接上游 | 买家 Agent 重新协调、重试或换人 |
+| 下游拒收格式 | Review Agent 提交 `InvalidFormat` 或买家 Agent 自己重排 |
+| 上游下线 | 平台 heartbeat timeout，取消未完成 assignment，触发退款 |
+| Review Agent 判定 unavailable | 平台记录 verdict，结算网关按规则处理 |
 
-平台处理的是状态和责任，不处理内容本身。
+平台处理的是 assignment 存活、审查结论和资金状态，不处理 handoff 过程。

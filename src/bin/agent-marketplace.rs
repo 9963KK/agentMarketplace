@@ -552,6 +552,82 @@ fn run(args: Vec<String>) -> Result<(), CliError> {
             let response = client.get("/settlement/balance", Some(&token))?;
             print_json(&response)?;
         }
+        "relay-create" => {
+            let size_bytes = parser
+                .take_option("--size-bytes")
+                .ok_or_else(|| CliError::usage("relay-create requires --size-bytes"))
+                .and_then(|value| parse_u64("--size-bytes", &value))?;
+            let ttl_secs = parser
+                .take_option("--ttl-secs")
+                .map(|value| parse_u64("--ttl-secs", &value))
+                .transpose()?;
+            let max_downloads = parser
+                .take_option("--max-downloads")
+                .map(|value| parse_u32("--max-downloads", &value))
+                .transpose()?;
+            parser.finish()?;
+
+            let response = client.post_json(
+                "/relay",
+                None,
+                None,
+                &json!({
+                    "size_bytes": size_bytes,
+                    "ttl_secs": ttl_secs,
+                    "max_downloads": max_downloads,
+                }),
+            )?;
+            print_json(&response)?;
+        }
+        "relay-upload" => {
+            let relay_id = parser
+                .take_option("--relay-id")
+                .ok_or_else(|| CliError::usage("relay-upload requires --relay-id"))?;
+            let relay_token = parser
+                .take_option("--relay-token")
+                .ok_or_else(|| CliError::usage("relay-upload requires --relay-token"))?;
+            let file = parser
+                .take_option("--file")
+                .ok_or_else(|| CliError::usage("relay-upload requires --file"))?;
+            parser.finish()?;
+
+            let response = client.put_bytes_with_relay_token(
+                &format!("/relay/{relay_id}"),
+                &relay_token,
+                fs::read(file)?,
+            )?;
+            print_json(&response)?;
+        }
+        "relay-download" => {
+            let relay_id = parser
+                .take_option("--relay-id")
+                .ok_or_else(|| CliError::usage("relay-download requires --relay-id"))?;
+            let relay_token = parser
+                .take_option("--relay-token")
+                .ok_or_else(|| CliError::usage("relay-download requires --relay-token"))?;
+            let out = parser
+                .take_option("--out")
+                .ok_or_else(|| CliError::usage("relay-download requires --out"))?;
+            parser.finish()?;
+
+            let bytes =
+                client.get_bytes_with_relay_token(&format!("/relay/{relay_id}"), &relay_token)?;
+            fs::write(out, bytes)?;
+            println!("ok");
+        }
+        "relay-delete" => {
+            let relay_id = parser
+                .take_option("--relay-id")
+                .ok_or_else(|| CliError::usage("relay-delete requires --relay-id"))?;
+            let relay_token = parser
+                .take_option("--relay-token")
+                .ok_or_else(|| CliError::usage("relay-delete requires --relay-token"))?;
+            parser.finish()?;
+
+            let response =
+                client.delete_with_relay_token(&format!("/relay/{relay_id}"), &relay_token)?;
+            print_json(&response)?;
+        }
         "deregister" => {
             let token = require_token(token)?;
             parser.finish()?;
@@ -684,6 +760,62 @@ impl HttpClient {
         self.request("PUT", path, token, idempotency_key, None, Some(body))
     }
 
+    fn put_bytes_with_relay_token(
+        &self,
+        path: &str,
+        relay_token: &str,
+        body: Vec<u8>,
+    ) -> Result<Value, CliError> {
+        let response = self.send_request(
+            "PUT",
+            path,
+            RequestHeaders {
+                relay_token: Some(relay_token),
+                content_type: Some("application/octet-stream"),
+                ..RequestHeaders::default()
+            },
+            body,
+        )?;
+        parse_http_value(response.status, &response.body)
+    }
+
+    fn get_bytes_with_relay_token(
+        &self,
+        path: &str,
+        relay_token: &str,
+    ) -> Result<Vec<u8>, CliError> {
+        let response = self.send_request(
+            "GET",
+            path,
+            RequestHeaders {
+                relay_token: Some(relay_token),
+                ..RequestHeaders::default()
+            },
+            Vec::new(),
+        )?;
+        if !(200..300).contains(&response.status) {
+            let body = response_body_value(&response.body);
+            return Err(CliError::Http {
+                status: response.status,
+                body,
+            });
+        }
+        Ok(response.body)
+    }
+
+    fn delete_with_relay_token(&self, path: &str, relay_token: &str) -> Result<Value, CliError> {
+        let response = self.send_request(
+            "DELETE",
+            path,
+            RequestHeaders {
+                relay_token: Some(relay_token),
+                ..RequestHeaders::default()
+            },
+            Vec::new(),
+        )?;
+        parse_http_value(response.status, &response.body)
+    }
+
     fn request(
         &self,
         method: &str,
@@ -697,27 +829,56 @@ impl HttpClient {
             .map(serde_json::to_vec)
             .transpose()?
             .unwrap_or_default();
+        let response = self.send_request(
+            method,
+            path,
+            RequestHeaders {
+                token,
+                idempotency_key,
+                registration_token,
+                content_type: (!body.is_empty()).then_some("application/json"),
+                ..RequestHeaders::default()
+            },
+            body,
+        )?;
+        parse_http_value(response.status, &response.body)
+    }
+
+    fn send_request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: RequestHeaders<'_>,
+        body: Vec<u8>,
+    ) -> Result<HttpResponse, CliError> {
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n",
             self.base.host_header()
         );
-        if let Some(token) = token {
+        if let Some(token) = headers.token {
             request.push_str("Authorization: Bearer ");
             request.push_str(token);
             request.push_str("\r\n");
         }
-        if let Some(key) = idempotency_key {
+        if let Some(key) = headers.idempotency_key {
             request.push_str("Idempotency-Key: ");
             request.push_str(key);
             request.push_str("\r\n");
         }
-        if let Some(token) = registration_token {
+        if let Some(token) = headers.registration_token {
             request.push_str("Registration-Token: ");
             request.push_str(token);
             request.push_str("\r\n");
         }
-        if !body.is_empty() {
-            request.push_str("Content-Type: application/json\r\n");
+        if let Some(token) = headers.relay_token {
+            request.push_str("Relay-Token: ");
+            request.push_str(token);
+            request.push_str("\r\n");
+        }
+        if let Some(content_type) = headers.content_type {
+            request.push_str("Content-Type: ");
+            request.push_str(content_type);
+            request.push_str("\r\n");
         }
         request.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
 
@@ -730,8 +891,23 @@ impl HttpClient {
 
         let mut response = Vec::new();
         stream.read_to_end(&mut response)?;
-        parse_http_response(&response)
+        parse_http_raw_response(&response)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestHeaders<'a> {
+    token: Option<&'a str>,
+    idempotency_key: Option<&'a str>,
+    registration_token: Option<&'a str>,
+    relay_token: Option<&'a str>,
+    content_type: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HttpResponse {
+    status: u16,
+    body: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -766,7 +942,7 @@ impl HttpBase {
     }
 }
 
-fn parse_http_response(response: &[u8]) -> Result<Value, CliError> {
+fn parse_http_raw_response(response: &[u8]) -> Result<HttpResponse, CliError> {
     let split = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -782,13 +958,20 @@ fn parse_http_response(response: &[u8]) -> Result<Value, CliError> {
         .nth(1)
         .ok_or_else(|| CliError::message("missing HTTP status code"))
         .and_then(|value| parse_u16("HTTP status", value))?;
-    let body = &response[split + 4..];
-    let value = if body.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(body)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).trim().to_string()))
-    };
+    Ok(HttpResponse {
+        status,
+        body: response[split + 4..].to_vec(),
+    })
+}
+
+#[cfg(test)]
+fn parse_http_response(response: &[u8]) -> Result<Value, CliError> {
+    let response = parse_http_raw_response(response)?;
+    parse_http_value(response.status, &response.body)
+}
+
+fn parse_http_value(status: u16, body: &[u8]) -> Result<Value, CliError> {
+    let value = response_body_value(body);
     if !(200..300).contains(&status) {
         return Err(CliError::Http {
             status,
@@ -796,6 +979,14 @@ fn parse_http_response(response: &[u8]) -> Result<Value, CliError> {
         });
     }
     Ok(value)
+}
+
+fn response_body_value(body: &[u8]) -> Value {
+    if body.is_empty() {
+        return Value::Null;
+    }
+    serde_json::from_slice(body)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).trim().to_string()))
 }
 
 #[derive(Debug)]
@@ -1083,6 +1274,10 @@ Commands:
   settle-execute --hold-id <id>
   settle-review --hold-id <id> --review-id <id>
   balance
+  relay-create --size-bytes <n> [--ttl-secs n] [--max-downloads n]
+  relay-upload --relay-id <id> --relay-token <token> --file <path>
+  relay-download --relay-id <id> --relay-token <token> --out <path>
+  relay-delete --relay-id <id> --relay-token <token>
   deregister
 "#
     );
@@ -1117,6 +1312,22 @@ mod tests {
                 .unwrap();
 
         assert_eq!(value, json!({ "ok": true }));
+    }
+
+    #[test]
+    fn parses_successful_http_response_as_bytes() {
+        let value = parse_http_raw_response(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\r\nabc",
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            HttpResponse {
+                status: 200,
+                body: b"abc".to_vec()
+            }
+        );
     }
 
     #[test]

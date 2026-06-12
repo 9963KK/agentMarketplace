@@ -4,7 +4,7 @@
 
 LiveSession 是任务当前运行批次。Assignment 是 Agent 被分配的一份可追踪、可审查、可结算的工作。
 
-目标设计中，LiveSession 不保存 Agent 内容、不保存内容 URI/hash/manifest，也不解析产物格式。Agent 输出是否存在只通过控制状态表达；内容流转由 Handoff 组件负责。
+目标设计中，LiveSession 不保存 Agent 内容、不保存内容 URI/hash/manifest，也不解析产物格式。Agent 输出是否存在只通过控制状态表达；内容流转和工作顺序由买家 Agent / 参与 Agent 私下维护。
 
 ---
 
@@ -23,7 +23,7 @@ pub struct LiveSessionCore {
 }
 ```
 
-索引只用于查询 Assignment，不表达内容依赖。普通 A -> B -> C 依赖由 `design/handoff/overview.md` 的 Handoff 表达。
+索引只用于查询 Assignment，不表达内容依赖。普通 A -> B -> C 依赖不进入平台，由买家 Agent 私下保存。
 
 ---
 
@@ -88,7 +88,7 @@ close_session
   -> Running -> Closed
 ```
 
-`mark_output_ready()` 只表示 Agent 声明本地输出已准备好，可以由下游通过 Handoff 点对点拉取。它不包含任何内容引用。
+`mark_output_ready()` 只表示 Agent 声明本地输出已准备好，可以由买家 Agent 或下游 Agent 通过私有协议点对点拉取。它不包含任何内容引用，也不表达下游是谁。
 
 ---
 
@@ -160,22 +160,22 @@ impl LiveSessionCore {
 - media profile / schema。
 - 任务语义。
 
-这些由 Agent-to-Agent 协议和 Review Agent 负责。
+这些由 Agent-to-Agent 私有协议和 Review Agent 负责。
 
 ---
 
-## 与 Handoff 的关系
+## 与私有链路的关系
 
-LiveSession 提供 Assignment 锚点；Handoff 表达 Assignment 之间的内容交接边：
+LiveSession 提供 Assignment 锚点，但不表达 Assignment 之间的普通执行依赖：
 
 ```text
 assignment-A OutputReady
-  -> handoff A->B Ready
-  -> B Received
+  -> 买家 Agent 私下通知 B
+  -> B 私下向 A 拉取内容
   -> assignment-B 开始执行
 ```
 
-LiveSession 不知道交接内容，只知道 Assignment 状态。
+LiveSession 不知道交接内容、下游是谁或完整链路，只知道 Assignment 状态。
 
 ---
 
@@ -184,7 +184,6 @@ LiveSession 不知道交接内容，只知道 Assignment 状态。
 SettlementGateway 应结合以下信息判断是否可放款：
 
 - Assignment 是否 `OutputReady` / `Approved`。
-- 必要 Handoff 是否 `Received` 或达到业务规则要求。
 - 必要 Review verdict 是否 Passed。
 - Hold 是否仍 Active 且绑定正确 Assignment。
 
@@ -192,10 +191,10 @@ SettlementGateway 应结合以下信息判断是否可放款：
 
 ## 当前代码现状差异
 
-当前实现仍包含 `submit_output`、`submit_artifact`、`output_hash` 和 ArtifactManifest 校验。它们属于旧设计，应在实现 Handoff 后迁移：
+当前实现仍包含 `submit_output`、`submit_artifact`、`output_hash` 和 ArtifactManifest 校验。它们属于旧设计，应迁移为：
 
 1. 添加 `OutputReady` 状态或等价状态。
 2. 添加 `mark_output_ready` API。
 3. 删除 server-side ArtifactManifest 校验。
 4. 删除 Assignment 上的内容 hash 字段。
-5. 让 Review / Settlement 依赖 Handoff 状态和 verdict，而不是内容 hash。
+5. 让 Review / Settlement 依赖 Assignment 状态和 verdict，而不是内容 hash 或 handoff 状态。

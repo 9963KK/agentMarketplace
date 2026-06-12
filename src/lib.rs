@@ -2,6 +2,7 @@ pub mod artifact;
 pub mod heartbeat;
 pub mod livesession;
 pub mod registry;
+pub mod relay;
 pub mod review;
 pub mod runtime;
 pub mod server;

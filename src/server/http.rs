@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -13,6 +14,7 @@ use tokio::net::TcpListener;
 use crate::artifact::ArtifactManifest;
 use crate::heartbeat::AgentId;
 use crate::registry::{AgentIdentity, DiscoveryQuery, ListAgentsQuery};
+use crate::relay::RelayId;
 use crate::review::{ReviewId, Verdict};
 use crate::settlement::{Balance, HoldId, HoldRequest};
 use crate::storage::IdempotencyKey;
@@ -24,6 +26,7 @@ use super::types::{AgentToken, AssignRequest, ServerError, SubmittedArtifact};
 const AUTHORIZATION: &str = "authorization";
 const IDEMPOTENCY_KEY: &str = "idempotency-key";
 const REGISTRATION_TOKEN: &str = "registration-token";
+const RELAY_TOKEN: &str = "relay-token";
 
 pub fn router(app: PlatformApp) -> Router {
     Router::new()
@@ -70,6 +73,13 @@ pub fn router(app: PlatformApp) -> Router {
         )
         .route("/settlement/refund", post(refund))
         .route("/settlement/balance", get(balance))
+        .route("/relay", post(create_relay_slot))
+        .route(
+            "/relay/{relay_id}",
+            put(upload_relay_blob)
+                .get(download_relay_blob)
+                .delete(delete_relay_blob),
+        )
         .with_state(app)
 }
 
@@ -410,6 +420,60 @@ async fn balance(
     }))
 }
 
+async fn create_relay_slot(
+    State(app): State<PlatformApp>,
+    Json(request): Json<CreateRelayRequest>,
+) -> Result<Json<super::types::CreatedRelay>, HttpError> {
+    Ok(Json(
+        app.create_relay_slot(
+            request.size_bytes,
+            request.ttl_secs,
+            request.max_downloads,
+            now(),
+        )
+        .await?,
+    ))
+}
+
+async fn upload_relay_blob(
+    State(app): State<PlatformApp>,
+    headers: HeaderMap,
+    Path(relay_id): Path<RelayId>,
+    body: Bytes,
+) -> Result<Json<crate::relay::RelayMetadata>, HttpError> {
+    Ok(Json(
+        app.upload_relay_blob(relay_id, relay_token(&headers)?, body.to_vec(), now())
+            .await?,
+    ))
+}
+
+async fn download_relay_blob(
+    State(app): State<PlatformApp>,
+    headers: HeaderMap,
+    Path(relay_id): Path<RelayId>,
+) -> Result<Response, HttpError> {
+    let download = app
+        .download_relay_blob(relay_id, relay_token(&headers)?, now())
+        .await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        download.encrypted_blob,
+    )
+        .into_response())
+}
+
+async fn delete_relay_blob(
+    State(app): State<PlatformApp>,
+    headers: HeaderMap,
+    Path(relay_id): Path<RelayId>,
+) -> Result<Json<crate::relay::RelayMetadata>, HttpError> {
+    Ok(Json(
+        app.delete_relay_blob(relay_id, relay_token(&headers)?, now())
+            .await?,
+    ))
+}
+
 fn auth_token(headers: &HeaderMap) -> Result<AgentToken, HttpError> {
     let value = headers
         .get(AUTHORIZATION)
@@ -428,6 +492,14 @@ fn optional_auth_token(headers: &HeaderMap) -> Option<AgentToken> {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .map(|token| AgentToken::from(token.to_string()))
+}
+
+fn relay_token(headers: &HeaderMap) -> Result<&str, HttpError> {
+    headers
+        .get(RELAY_TOKEN)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ServerError::Unauthorized.into())
 }
 
 fn registration_token(headers: &HeaderMap) -> Option<&str> {
@@ -496,6 +568,13 @@ struct AddParticipantRequest {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     task_id: TaskId,
+}
+
+#[derive(Deserialize)]
+struct CreateRelayRequest {
+    size_bytes: u64,
+    ttl_secs: Option<u64>,
+    max_downloads: Option<u32>,
 }
 
 #[derive(Deserialize)]

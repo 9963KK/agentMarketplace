@@ -1,4 +1,6 @@
 use std::env;
+use std::fs::File;
+use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,6 +10,10 @@ use crate::livesession::{Assignment, AssignmentKind, LiveSessionHandle, LiveSess
 use crate::registry::{
     AgentCandidate, AgentIdentity, AgentListing, Capability, DiscoveryQuery, ListAgentsQuery,
     RegistryHandle, RegistryService,
+};
+use crate::relay::{
+    RelayDownload, RelayError, RelayHandle, RelayId, RelayMetadata, RelayService,
+    RelayServiceError, RelayTokenHash,
 };
 use crate::review::{ReviewHandle, ReviewService, ReviewSession, Verdict};
 use crate::runtime::Runtime;
@@ -22,10 +28,10 @@ use crate::task::{TaskHandle, TaskService};
 use crate::types::{AssignmentId, SessionId, TaskId, Timestamp};
 
 use super::types::{
-    AgentToken, AssignRequest, CreatedAssignment, CreatedHold, CreatedSession, PingResponse,
-    RegisterAgentResponse, RequestedReview, ReviewRequest, ServerError, SubmittedArtifact,
-    parse_assignment_id, parse_hold_id, parse_review_id, parse_session_id, parse_task_id,
-    require_assignment_agent, require_task_publisher,
+    AgentToken, AssignRequest, CreatedAssignment, CreatedHold, CreatedRelay, CreatedSession,
+    PingResponse, RegisterAgentResponse, RequestedReview, ReviewRequest, ServerError,
+    SubmittedArtifact, parse_assignment_id, parse_hold_id, parse_review_id, parse_session_id,
+    parse_task_id, require_assignment_agent, require_task_publisher,
 };
 
 #[derive(Clone, Debug)]
@@ -38,6 +44,7 @@ pub struct PlatformApp {
     settlement: SettlementHandle,
     settlement_gateway: SettlementGateway,
     storage: StorageHandle,
+    relay: RelayHandle,
     token_counter: Arc<AtomicU64>,
     registration_token: Option<String>,
 }
@@ -59,6 +66,7 @@ impl PlatformApp {
         let review = ReviewService::spawn();
         let settlement = SettlementService::spawn();
         let storage = StorageService::spawn();
+        let relay = RelayService::spawn();
         let runtime = Runtime::new(
             registry.clone(),
             settlement.clone(),
@@ -79,6 +87,7 @@ impl PlatformApp {
             settlement,
             settlement_gateway,
             storage,
+            relay,
             token_counter: Arc::new(AtomicU64::new(0)),
             registration_token: registration_token.and_then(non_empty_secret),
         })
@@ -92,6 +101,7 @@ impl PlatformApp {
         let _ = self.review.shutdown().await;
         let _ = self.settlement.shutdown().await;
         let _ = self.storage.shutdown().await;
+        let _ = self.relay.shutdown().await;
     }
 
     pub async fn register_agent(
@@ -852,6 +862,73 @@ impl PlatformApp {
             .map_err(|error| ServerError::component("settlement", error))
     }
 
+    pub async fn create_relay_slot(
+        &self,
+        size_bytes: u64,
+        ttl_secs: Option<u64>,
+        max_downloads: Option<u32>,
+        at: Timestamp,
+    ) -> Result<CreatedRelay, ServerError> {
+        let upload_token = issue_relay_token()?;
+        let download_token = issue_relay_token()?;
+        let created = self
+            .relay
+            .create_slot(
+                size_bytes,
+                ttl_secs,
+                max_downloads,
+                hash_relay_token(&upload_token)?,
+                hash_relay_token(&download_token)?,
+                at,
+            )
+            .await
+            .map_err(map_relay_error)?;
+
+        Ok(CreatedRelay {
+            relay_id: created.relay_id,
+            upload_token,
+            download_token,
+            expires_at: created.expires_at,
+        })
+    }
+
+    pub async fn upload_relay_blob(
+        &self,
+        relay_id: RelayId,
+        relay_token: &str,
+        encrypted_blob: Vec<u8>,
+        at: Timestamp,
+    ) -> Result<RelayMetadata, ServerError> {
+        self.relay
+            .upload(relay_id, hash_relay_token(relay_token)?, encrypted_blob, at)
+            .await
+            .map_err(map_relay_error)
+    }
+
+    pub async fn download_relay_blob(
+        &self,
+        relay_id: RelayId,
+        relay_token: &str,
+        at: Timestamp,
+    ) -> Result<RelayDownload, ServerError> {
+        self.relay
+            .download(relay_id, hash_relay_token(relay_token)?, at)
+            .await
+            .map_err(map_relay_error)
+    }
+
+    pub async fn delete_relay_blob(
+        &self,
+        relay_id: RelayId,
+        relay_token: &str,
+        at: Timestamp,
+    ) -> Result<RelayMetadata, ServerError> {
+        self.relay
+            .delete(relay_id, hash_relay_token(relay_token)?, at)
+            .await
+            .map_err(map_relay_error)
+    }
+
     fn issue_token(
         &self,
         agent_id: &AgentId,
@@ -1054,6 +1131,53 @@ fn hash_token(token: &AgentToken) -> Result<TokenHash, ServerError> {
     let digest = sha256_digest(token.as_str().as_bytes())
         .map_err(|error| ServerError::component("artifact", error))?;
     Ok(TokenHash::from(digest.to_string()))
+}
+
+fn hash_relay_token(token: &str) -> Result<RelayTokenHash, ServerError> {
+    if token.trim().is_empty() {
+        return Err(ServerError::Unauthorized);
+    }
+    let digest = sha256_digest(token.as_bytes())
+        .map_err(|error| ServerError::component("artifact", error))?;
+    Ok(RelayTokenHash::from(digest.to_string()))
+}
+
+fn issue_relay_token() -> Result<String, ServerError> {
+    let mut bytes = [0u8; 32];
+    let mut random =
+        File::open("/dev/urandom").map_err(|error| ServerError::component("relay", error))?;
+    random
+        .read_exact(&mut bytes)
+        .map_err(|error| ServerError::component("relay", error))?;
+    Ok(format!("relay-token-{}", hex_bytes(&bytes)))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn map_relay_error(error: RelayServiceError) -> ServerError {
+    match error {
+        RelayServiceError::Relay(RelayError::Unauthorized) => ServerError::Unauthorized,
+        RelayServiceError::Relay(
+            RelayError::RelayNotFound(relay_id)
+            | RelayError::Expired(relay_id)
+            | RelayError::Deleted(relay_id),
+        ) => ServerError::NotFound(format!("relay {relay_id}")),
+        RelayServiceError::Relay(RelayError::InvalidConfig(message)) => {
+            ServerError::component("relay", message)
+        }
+        RelayServiceError::Relay(error) => ServerError::BadRequest(error.to_string()),
+        RelayServiceError::Stopped | RelayServiceError::ResponseDropped => {
+            ServerError::component("relay", error)
+        }
+    }
 }
 
 fn non_empty_secret(value: String) -> Option<String> {
