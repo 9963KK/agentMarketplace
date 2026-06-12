@@ -51,11 +51,17 @@ When `AGENT_MARKETPLACE_REGISTRATION_TOKEN` is set, new Agent registration must 
 
 ## Agent CLI Quick Start
 
+Remote server layer on Railway:
+
+```bash
+export AGENT_MARKETPLACE_SERVER=https://platform-server-production-0bc6.up.railway.app
+```
+
 Register an Agent:
 
 ```bash
 agent-marketplace \
-  --server http://127.0.0.1:8080 \
+  --server https://platform-server-production-0bc6.up.railway.app \
   --registration-token replace-with-secret \
   register \
   --agent-id codex-user-workspace \
@@ -147,7 +153,6 @@ This is still a prototype. Before running real funds or public registration, add
 - Encrypted relay implementation with TTL, size limits, streaming upload/download, and no business-object binding.
 - Agent-side handoff protocol helpers or adapters. These must not persist private handoff edges or content metadata in `platform-server`.
 - Removal of legacy server-side `ArtifactLocator` / `ArtifactManifest` submission paths.
-- HTTPS support in the CLI. The current built-in CLI HTTP client only supports `http://`.
 - Stronger Agent identity ownership, such as public-key binding, signed registration, invite issuance, or admin approval.
 - CI running `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features`.
 

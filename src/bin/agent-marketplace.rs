@@ -3,13 +3,13 @@ use std::env;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use reqwest::Method;
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -699,13 +699,15 @@ fn credentials_from_register_response(server: &str, response: &Value) -> Option<
 
 #[derive(Clone, Debug)]
 struct HttpClient {
-    base: HttpBase,
+    base: String,
+    client: Client,
 }
 
 impl HttpClient {
     fn new(server: String) -> Result<Self, CliError> {
         Ok(Self {
-            base: HttpBase::parse(&server)?,
+            base: normalize_server(&server)?,
+            client: Client::builder().build()?,
         })
     }
 
@@ -851,47 +853,36 @@ impl HttpClient {
         headers: RequestHeaders<'_>,
         body: Vec<u8>,
     ) -> Result<HttpResponse, CliError> {
-        let mut request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n",
-            self.base.host_header()
-        );
+        let method = Method::from_bytes(method.as_bytes())
+            .map_err(|_| CliError::usage(format!("invalid HTTP method: {method}")))?;
+        let url = format!("{}{}", self.base, path);
+        let mut request = self
+            .client
+            .request(method, url)
+            .header("accept", "application/json");
         if let Some(token) = headers.token {
-            request.push_str("Authorization: Bearer ");
-            request.push_str(token);
-            request.push_str("\r\n");
+            request = request.bearer_auth(token);
         }
         if let Some(key) = headers.idempotency_key {
-            request.push_str("Idempotency-Key: ");
-            request.push_str(key);
-            request.push_str("\r\n");
+            request = request.header("Idempotency-Key", key);
         }
         if let Some(token) = headers.registration_token {
-            request.push_str("Registration-Token: ");
-            request.push_str(token);
-            request.push_str("\r\n");
+            request = request.header("Registration-Token", token);
         }
         if let Some(token) = headers.relay_token {
-            request.push_str("Relay-Token: ");
-            request.push_str(token);
-            request.push_str("\r\n");
+            request = request.header("Relay-Token", token);
         }
         if let Some(content_type) = headers.content_type {
-            request.push_str("Content-Type: ");
-            request.push_str(content_type);
-            request.push_str("\r\n");
+            request = request.header("Content-Type", content_type);
         }
-        request.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
-
-        let mut stream = TcpStream::connect((self.base.host.as_str(), self.base.port))?;
-        stream.write_all(request.as_bytes())?;
         if !body.is_empty() {
-            stream.write_all(&body)?;
+            request = request.body(body);
         }
-        stream.flush()?;
 
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response)?;
-        parse_http_raw_response(&response)
+        let response = request.send()?;
+        let status = response.status().as_u16();
+        let body = response.bytes()?.to_vec();
+        Ok(HttpResponse { status, body })
     }
 }
 
@@ -910,38 +901,20 @@ struct HttpResponse {
     body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct HttpBase {
-    host: String,
-    port: u16,
+fn normalize_server(value: &str) -> Result<String, CliError> {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return Err(CliError::usage("server URL is empty"));
+    }
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
+        return Err(CliError::usage(
+            "server must start with http:// or https://",
+        ));
+    }
+    Ok(value.to_string())
 }
 
-impl HttpBase {
-    fn parse(value: &str) -> Result<Self, CliError> {
-        let value = value
-            .strip_prefix("http://")
-            .ok_or_else(|| CliError::usage("only http:// servers are supported"))?;
-        let authority = value.split('/').next().unwrap_or(value);
-        if authority.is_empty() {
-            return Err(CliError::usage("server host is empty"));
-        }
-        let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
-            (host.to_string(), parse_u16("server port", port)?)
-        } else {
-            (authority.to_string(), 80)
-        };
-        Ok(Self { host, port })
-    }
-
-    fn host_header(&self) -> String {
-        if self.port == 80 {
-            self.host.clone()
-        } else {
-            format!("{}:{}", self.host, self.port)
-        }
-    }
-}
-
+#[cfg(test)]
 fn parse_http_raw_response(response: &[u8]) -> Result<HttpResponse, CliError> {
     let split = response
         .windows(4)
@@ -1054,6 +1027,7 @@ enum CliError {
     Usage(String),
     Message(String),
     Http { status: u16, body: Value },
+    Request(reqwest::Error),
     Io(std::io::Error),
     Json(serde_json::Error),
 }
@@ -1080,6 +1054,7 @@ impl fmt::Display for CliError {
                     compact_json(body).unwrap_or_else(|_| body.to_string())
                 )
             }
+            CliError::Request(error) => write!(f, "{error}"),
             CliError::Io(error) => write!(f, "{error}"),
             CliError::Json(error) => write!(f, "{error}"),
         }
@@ -1091,6 +1066,12 @@ impl Error for CliError {}
 impl From<std::io::Error> for CliError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<reqwest::Error> for CliError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Request(error)
     }
 }
 
@@ -1242,7 +1223,7 @@ fn print_help() {
         r#"agent-marketplace <command> [options]
 
 Global options:
-  --server <url>          Default: AGENT_MARKETPLACE_SERVER or http://127.0.0.1:8080
+  --server <url>          http:// or https://. Default: AGENT_MARKETPLACE_SERVER or http://127.0.0.1:8080
   --token <token>         Default: AGENT_MARKETPLACE_TOKEN or saved credentials
   --agent-id <id>         Default: AGENT_MARKETPLACE_AGENT_ID or saved credentials
   --registration-token <token>
@@ -1288,21 +1269,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_http_base_with_default_and_explicit_port() {
+    fn normalizes_http_and_https_server_urls() {
         assert_eq!(
-            HttpBase::parse("http://127.0.0.1:8080").unwrap(),
-            HttpBase {
-                host: "127.0.0.1".to_string(),
-                port: 8080
-            }
+            normalize_server("http://127.0.0.1:8080/").unwrap(),
+            "http://127.0.0.1:8080"
         );
         assert_eq!(
-            HttpBase::parse("http://example.com/api").unwrap(),
-            HttpBase {
-                host: "example.com".to_string(),
-                port: 80
-            }
+            normalize_server("https://platform-server-production-0bc6.up.railway.app").unwrap(),
+            "https://platform-server-production-0bc6.up.railway.app"
         );
+        assert!(normalize_server("ftp://example.com").is_err());
     }
 
     #[test]

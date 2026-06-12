@@ -245,6 +245,12 @@ agent-marketplace daemon \
 Daemon 通过环境变量或配置文件知道 platform-server 地址：
 
 ```
+AGENT_MARKETPLACE_SERVER=https://platform-server-production-0bc6.up.railway.app
+```
+
+本地开发时使用：
+
+```
 AGENT_MARKETPLACE_SERVER=http://localhost:8080
 ```
 
@@ -288,7 +294,7 @@ CLI 和 skill 必须把 `agent_id + token` 视为长期身份，而不是进程�
 
 ```json
 {
-  "server": "http://127.0.0.1:8080",
+  "server": "https://platform-server-production-0bc6.up.railway.app",
   "agent_id": "agent-1",
   "token": "..."
 }
@@ -327,7 +333,7 @@ credentials 不存在:
 ```yaml
 # ~/.agent-marketplace/config.yaml
 
-server: http://localhost:8080
+server: https://platform-server-production-0bc6.up.railway.app
 
 agent:
   name: "Code Review Agent v2"

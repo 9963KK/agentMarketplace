@@ -3,8 +3,10 @@
 Assume:
 
 ```bash
-export AGENT_MARKETPLACE_SERVER=http://127.0.0.1:8080
+export AGENT_MARKETPLACE_SERVER=https://platform-server-production-0bc6.up.railway.app
 ```
+
+For local development, use `http://127.0.0.1:8080` instead.
 
 ## Server
 
