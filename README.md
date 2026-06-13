@@ -157,3 +157,7 @@ This is still a prototype. Before running real funds or public registration, add
 - CI running `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets --all-features`.
 
 Design details live under `design/`.
+
+## Links
+
+- [linux.do](https://linux.do/)
